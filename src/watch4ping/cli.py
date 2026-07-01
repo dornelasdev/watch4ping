@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import re
 from typing import Iterable
 
 from .exporters import write_reports
 from .monitor import MonitorConfig, run_monitor
 from .ping import SystemPingProbe
 from .report import build_report, format_console_summary
+
+
+DURATION_RE = re.compile(r"^(?P<value>\d+(?:\.\d+)?)(?P<unit>s|m|h)?$")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -42,6 +46,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Consecutive failed samples required to count as an outage. Defaults to 3.",
     )
     parser.add_argument(
+        "-d",
+        "--duration",
+        type=parse_duration_seconds,
+        help="Stop automatically after a duration, such as 30s, 5m, or 1h.",
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=Path("reports"),
@@ -51,7 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--format",
         dest="formats",
         action="append",
-        choices=("json", "csv", "md", "all"),
+        choices=("json", "csv", "md", "html", "all"),
         help="Report format to write without prompting. May be repeated.",
     )
     parser.add_argument(
@@ -78,13 +88,11 @@ def main(argv: list[str] | None = None) -> int:
         interval_seconds=args.interval,
         timeout_seconds=args.timeout,
         fail_threshold=args.fail_threshold,
+        duration_seconds=args.duration,
     )
     formats = normalize_formats(args.formats)
 
-    print(
-        f"Monitoring {config.target} every {config.interval_seconds:g}s "
-        f"(timeout {config.timeout_seconds:g}s). Press Ctrl-C to stop."
-    )
+    print(build_start_message(config))
 
     session = run_monitor(
         config=config,
@@ -134,26 +142,61 @@ def prompt_yes_no(prompt: str) -> bool:
 
 
 def prompt_report_formats() -> tuple[str, ...]:
-    valid_formats = {"json", "csv", "md"}
+    valid_formats = {"json", "csv", "md", "html"}
 
     while True:
         try:
-            answer = input("Format [json/csv/md/all]: ").strip().lower()
+            answer = input("Format [json/csv/md/html/all]: ").strip().lower()
         except EOFError:
             print()
             return ("json",)
 
         if answer == "all":
-            return ("json", "csv", "md")
+            return ("json", "csv", "md", "html")
 
         selected = tuple(part.strip() for part in answer.split(",") if part.strip())
         if selected and all(part in valid_formats for part in selected):
             return selected
 
-        print("Please enter json, csv, md, all, or a comma-separated list.")
+        print("Please enter json, csv, md, html, all, or a comma-separated list.")
 
 
 def normalize_formats(formats: Iterable[str] | None) -> tuple[str, ...]:
     if not formats or "all" in formats:
-        return ("json", "csv", "md")
+        return ("json", "csv", "md", "html")
     return tuple(formats)
+
+
+def parse_duration_seconds(value: str) -> float:
+    match = DURATION_RE.match(value.strip().lower())
+    if not match:
+        raise argparse.ArgumentTypeError("duration must look like 30s, 5m, 1h, or 60")
+
+    amount = float(match.group("value"))
+    if amount <= 0:
+        raise argparse.ArgumentTypeError("duration must be greater than 0")
+
+    unit = match.group("unit") or "s"
+    multipliers = {"s": 1, "m": 60, "h": 3600}
+    return amount * multipliers[unit]
+
+
+def build_start_message(config: MonitorConfig) -> str:
+    duration = (
+        f" for {format_duration_argument(config.duration_seconds)}"
+        if config.duration_seconds is not None
+        else ""
+    )
+    stop_hint = "Press Ctrl-C to stop early." if config.duration_seconds else "Press Ctrl-C to stop."
+    return (
+        f"Monitoring {config.target} every {config.interval_seconds:g}s "
+        f"(timeout {config.timeout_seconds:g}s){duration}. {stop_hint}"
+    )
+
+
+def format_duration_argument(duration_seconds: float) -> str:
+    if duration_seconds % 3600 == 0:
+        return f"{duration_seconds / 3600:g}h"
+    if duration_seconds % 60 == 0:
+        return f"{duration_seconds / 60:g}m"
+    return f"{duration_seconds:g}s"

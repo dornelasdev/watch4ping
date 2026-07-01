@@ -20,6 +20,7 @@ class MonitorConfig:
     interval_seconds: float = 2.0
     timeout_seconds: float = 1.0
     fail_threshold: int = 3
+    duration_seconds: float | None = None
 
 
 def run_monitor(
@@ -30,11 +31,26 @@ def run_monitor(
     started_at = datetime.now(timezone.utc)
     samples: list[PingSample] = []
     sequence = 1
-    next_probe_at = time.monotonic()
+    started_monotonic = time.monotonic()
+    next_probe_at = started_monotonic
+    stop_at = (
+        started_monotonic + config.duration_seconds
+        if config.duration_seconds is not None
+        else None
+    )
 
     try:
         while True:
-            sleep_seconds = next_probe_at - time.monotonic()
+            current_monotonic = time.monotonic()
+            if should_stop_before_next_sample(
+                next_probe_at=next_probe_at,
+                stop_at=stop_at,
+                has_samples=bool(samples),
+                current_monotonic=current_monotonic,
+            ):
+                break
+
+            sleep_seconds = next_probe_at - current_monotonic
             if sleep_seconds > 0:
                 time.sleep(sleep_seconds)
 
@@ -55,16 +71,31 @@ def run_monitor(
             sequence += 1
             next_probe_at += config.interval_seconds
     except KeyboardInterrupt:
-        ended_at = datetime.now(timezone.utc)
-        return MonitorSession(
-            target=config.target,
-            interval_seconds=config.interval_seconds,
-            timeout_seconds=config.timeout_seconds,
-            fail_threshold=config.fail_threshold,
-            started_at=started_at,
-            ended_at=ended_at,
-            samples=tuple(samples),
-        )
+        pass
+
+    ended_at = datetime.now(timezone.utc)
+    return MonitorSession(
+        target=config.target,
+        interval_seconds=config.interval_seconds,
+        timeout_seconds=config.timeout_seconds,
+        fail_threshold=config.fail_threshold,
+        started_at=started_at,
+        ended_at=ended_at,
+        samples=tuple(samples),
+    )
+
+
+def should_stop_before_next_sample(
+    next_probe_at: float,
+    stop_at: float | None,
+    has_samples: bool,
+    current_monotonic: float,
+) -> bool:
+    return (
+        stop_at is not None
+        and has_samples
+        and (next_probe_at > stop_at or current_monotonic > stop_at)
+    )
 
 
 def print_sample(sample: PingSample) -> None:
@@ -74,4 +105,3 @@ def print_sample(sample: PingSample) -> None:
     else:
         message = f"[{sample.sequence}] FAIL {sample.error or 'no response'}"
     print(message, file=sys.stderr)
-

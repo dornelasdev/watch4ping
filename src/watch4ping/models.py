@@ -74,6 +74,24 @@ class Outage:
 
 
 @dataclass(frozen=True)
+class LatencySpike:
+    sequence: int
+    timestamp: datetime
+    formatted_timestamp: str
+    latency_ms: float
+    threshold_ms: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "sequence": self.sequence,
+            "timestamp": self.timestamp.isoformat(),
+            "formatted_timestamp": self.formatted_timestamp,
+            "latency_ms": self.latency_ms,
+            "threshold_ms": self.threshold_ms,
+        }
+
+
+@dataclass(frozen=True)
 class ReportSummary:
     duration_seconds: float
     total_samples: int
@@ -85,7 +103,12 @@ class ReportSummary:
     min_latency_ms: float | None
     avg_latency_ms: float | None
     max_latency_ms: float | None
+    p50_latency_ms: float | None
+    p95_latency_ms: float | None
+    p99_latency_ms: float | None
     jitter_ms: float | None
+    latency_spike_count: int
+    latency_spike_threshold_ms: float | None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -99,19 +122,28 @@ class ReportSummary:
             "min_latency_ms": self.min_latency_ms,
             "avg_latency_ms": self.avg_latency_ms,
             "max_latency_ms": self.max_latency_ms,
+            "p50_latency_ms": self.p50_latency_ms,
+            "p95_latency_ms": self.p95_latency_ms,
+            "p99_latency_ms": self.p99_latency_ms,
             "jitter_ms": self.jitter_ms,
+            "latency_spike_count": self.latency_spike_count,
+            "latency_spike_threshold_ms": self.latency_spike_threshold_ms,
         }
 
 
 @dataclass(frozen=True)
 class SessionReport:
+    schema_version: str
     session: MonitorSession
     summary: ReportSummary
     outages: tuple[Outage, ...]
+    latency_spikes: tuple[LatencySpike, ...]
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "schema_version": self.schema_version,
             "session": self.session.to_dict(),
             "summary": self.summary.to_dict(),
             "outages": [outage.to_dict() for outage in self.outages],
+            "latency_spikes": [spike.to_dict() for spike in self.latency_spikes],
         }

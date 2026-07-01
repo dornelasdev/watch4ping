@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Iterable
 
 from .models import SessionReport
-from .report import format_markdown_report
+from .report import format_html_report, format_markdown_report
 
 
 def write_reports(
@@ -28,6 +28,9 @@ def write_reports(
         elif report_format == "md":
             path = output_dir / f"{base_name}.md"
             path.write_text(format_markdown_report(report), encoding="utf-8")
+        elif report_format == "html":
+            path = output_dir / f"{base_name}.html"
+            path.write_text(format_html_report(report), encoding="utf-8")
         else:
             raise ValueError(f"Unsupported report format: {report_format}")
         written.append(path)
