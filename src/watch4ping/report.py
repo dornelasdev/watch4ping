@@ -1,53 +1,40 @@
 from __future__ import annotations
 
 from html import escape
+from ipaddress import ip_address
 from statistics import fmean, pstdev
 
-from .models import LatencySpike, MonitorSession, Outage, PingSample, ReportSummary, SessionReport
+from .models import (
+    Diagnosis,
+    LatencySpike,
+    MonitorSession,
+    Outage,
+    PingSample,
+    ReportSummary,
+    SessionReport,
+    Target,
+    TargetReport,
+)
 
 
-REPORT_SCHEMA_VERSION = "1"
+REPORT_SCHEMA_VERSION = "3"
 
 
 def build_report(session: MonitorSession) -> SessionReport:
-    outages = detect_outages(session)
-    latencies = [
-        sample.latency_ms
-        for sample in session.samples
-        if sample.ok and sample.latency_ms is not None
-    ]
-    total_samples = len(session.samples)
-    successful_samples = sum(1 for sample in session.samples if sample.ok)
-    failed_samples = total_samples - successful_samples
-    duration_seconds = (session.ended_at - session.started_at).total_seconds()
-    p50_latency_ms = percentile(latencies, 50)
-    p95_latency_ms = percentile(latencies, 95)
-    p99_latency_ms = percentile(latencies, 99)
-    avg_latency_ms = fmean(latencies) if latencies else None
-    jitter_ms = pstdev(latencies) if len(latencies) > 1 else None
-    latency_spike_threshold_ms = calculate_latency_spike_threshold(
-        avg_latency_ms=avg_latency_ms,
-        p95_latency_ms=p95_latency_ms,
+    target_reports = build_target_reports(session)
+    outages = detect_outages(session.samples, session.fail_threshold, session.interval_seconds)
+    latency_spikes = detect_latency_spikes(
+        session.samples,
+        calculate_latency_spike_threshold_for_samples(session.samples),
     )
-    latency_spikes = detect_latency_spikes(session.samples, latency_spike_threshold_ms)
 
-    summary = ReportSummary(
-        duration_seconds=max(0.0, duration_seconds),
-        total_samples=total_samples,
-        successful_samples=successful_samples,
-        failed_samples=failed_samples,
-        uptime_percent=(successful_samples / total_samples * 100) if total_samples else 0.0,
+    summary = build_summary(
+        samples=session.samples,
+        duration_seconds=(session.ended_at - session.started_at).total_seconds(),
         outage_count=len(outages),
         longest_outage_seconds=max((outage.duration_seconds for outage in outages), default=0.0),
-        min_latency_ms=min(latencies) if latencies else None,
-        avg_latency_ms=avg_latency_ms,
-        max_latency_ms=max(latencies) if latencies else None,
-        p50_latency_ms=p50_latency_ms,
-        p95_latency_ms=p95_latency_ms,
-        p99_latency_ms=p99_latency_ms,
-        jitter_ms=jitter_ms,
         latency_spike_count=len(latency_spikes),
-        latency_spike_threshold_ms=latency_spike_threshold_ms,
+        latency_spike_threshold_ms=calculate_latency_spike_threshold_for_samples(session.samples),
     )
     return SessionReport(
         schema_version=REPORT_SCHEMA_VERSION,
@@ -55,6 +42,109 @@ def build_report(session: MonitorSession) -> SessionReport:
         summary=summary,
         outages=tuple(outages),
         latency_spikes=tuple(latency_spikes),
+        target_reports=tuple(target_reports),
+        diagnoses=tuple(diagnose_session(session, target_reports)),
+    )
+
+
+def build_target_reports(session: MonitorSession) -> list[TargetReport]:
+    reports: list[TargetReport] = []
+    duration_seconds = (session.ended_at - session.started_at).total_seconds()
+
+    for target in session.targets:
+        samples = samples_for_target(session, target)
+        outages = detect_outages(samples, session.fail_threshold, session.interval_seconds)
+        latency_spike_threshold_ms = calculate_latency_spike_threshold_for_samples(samples)
+        latency_spikes = detect_latency_spikes(samples, latency_spike_threshold_ms)
+        reports.append(
+            TargetReport(
+                target=target,
+                summary=build_summary(
+                    samples=samples,
+                    duration_seconds=duration_seconds,
+                    outage_count=len(outages),
+                    longest_outage_seconds=max(
+                        (outage.duration_seconds for outage in outages),
+                        default=0.0,
+                    ),
+                    latency_spike_count=len(latency_spikes),
+                    latency_spike_threshold_ms=latency_spike_threshold_ms,
+                ),
+                outages=tuple(outages),
+                latency_spikes=tuple(latency_spikes),
+            )
+        )
+
+    return reports
+
+
+def build_summary(
+    samples: tuple[PingSample, ...],
+    duration_seconds: float,
+    outage_count: int,
+    longest_outage_seconds: float,
+    latency_spike_count: int,
+    latency_spike_threshold_ms: float | None,
+) -> ReportSummary:
+    latencies = [
+        sample.latency_ms
+        for sample in samples
+        if sample.ok and sample.latency_ms is not None
+    ]
+    total_samples = len(samples)
+    successful_samples = sum(1 for sample in samples if sample.ok)
+    failed_samples = total_samples - successful_samples
+    p50_latency_ms = percentile(latencies, 50)
+    p95_latency_ms = percentile(latencies, 95)
+    p99_latency_ms = percentile(latencies, 99)
+    avg_latency_ms = fmean(latencies) if latencies else None
+    jitter_ms = pstdev(latencies) if len(latencies) > 1 else None
+
+    return ReportSummary(
+        duration_seconds=max(0.0, duration_seconds),
+        total_samples=total_samples,
+        successful_samples=successful_samples,
+        failed_samples=failed_samples,
+        uptime_percent=(successful_samples / total_samples * 100) if total_samples else 0.0,
+        outage_count=outage_count,
+        longest_outage_seconds=longest_outage_seconds,
+        min_latency_ms=min(latencies) if latencies else None,
+        avg_latency_ms=avg_latency_ms,
+        max_latency_ms=max(latencies) if latencies else None,
+        p50_latency_ms=p50_latency_ms,
+        p95_latency_ms=p95_latency_ms,
+        p99_latency_ms=p99_latency_ms,
+        jitter_ms=jitter_ms,
+        latency_spike_count=latency_spike_count,
+        latency_spike_threshold_ms=latency_spike_threshold_ms,
+    )
+
+
+def samples_for_target(session: MonitorSession, target: Target) -> tuple[PingSample, ...]:
+    return tuple(
+        sample
+        for sample in session.samples
+        if sample_matches_target(sample, target, session.targets[0])
+    )
+
+
+def sample_matches_target(sample: PingSample, target: Target, default_target: Target) -> bool:
+    sample_label = sample.target_label or default_target.label
+    sample_host = sample.target_host or default_target.host
+    return sample_label == target.label and sample_host == target.host
+
+
+def calculate_latency_spike_threshold_for_samples(
+    samples: tuple[PingSample, ...],
+) -> float | None:
+    latencies = [
+        sample.latency_ms
+        for sample in samples
+        if sample.ok and sample.latency_ms is not None
+    ]
+    return calculate_latency_spike_threshold(
+        avg_latency_ms=fmean(latencies) if latencies else None,
+        p95_latency_ms=percentile(latencies, 95),
     )
 
 
@@ -98,27 +188,33 @@ def detect_latency_spikes(
             formatted_timestamp=sample.formatted_timestamp,
             latency_ms=sample.latency_ms,
             threshold_ms=threshold_ms,
+            target_label=sample.target_label,
+            target_host=sample.target_host,
         )
         for sample in samples
         if sample.ok and sample.latency_ms is not None and sample.latency_ms >= threshold_ms
     ]
 
 
-def detect_outages(session: MonitorSession) -> list[Outage]:
+def detect_outages(
+    samples: tuple[PingSample, ...],
+    fail_threshold: int,
+    interval_seconds: float,
+) -> list[Outage]:
     outages: list[Outage] = []
     failed_run: list[PingSample] = []
 
-    for sample in session.samples:
+    for sample in samples:
         if not sample.ok:
             failed_run.append(sample)
             continue
 
-        if len(failed_run) >= session.fail_threshold:
-            outages.append(outage_from_failed_run(failed_run, session.interval_seconds))
+        if len(failed_run) >= fail_threshold:
+            outages.append(outage_from_failed_run(failed_run, interval_seconds))
         failed_run = []
 
-    if len(failed_run) >= session.fail_threshold:
-        outages.append(outage_from_failed_run(failed_run, session.interval_seconds))
+    if len(failed_run) >= fail_threshold:
+        outages.append(outage_from_failed_run(failed_run, interval_seconds))
 
     return outages
 
@@ -136,11 +232,145 @@ def outage_from_failed_run(failed_run: list[PingSample], interval_seconds: float
     )
 
 
+def diagnose_session(
+    _session: MonitorSession,
+    target_reports: list[TargetReport],
+) -> list[Diagnosis]:
+    if len(target_reports) < 2:
+        return [
+            Diagnosis(
+                code="single_target",
+                message="Single target monitored; add router, external IP, and hostname targets for diagnosis.",
+            )
+        ]
+
+    router_report = find_router_report(target_reports)
+    external_ip_report = find_external_ip_report(target_reports, exclude=router_report)
+    hostname_report = find_hostname_report(target_reports)
+
+    diagnoses: list[Diagnosis] = []
+    if router_report and router_report.summary.failed_samples > 0:
+        diagnoses.append(
+            Diagnosis(
+                code="local_network_issue",
+                message=(
+                    f"{router_report.target.label} had failures; likely local network, Wi-Fi, "
+                    "Ethernet, or router issue."
+                ),
+            )
+        )
+
+    if (
+        router_report
+        and external_ip_report
+        and router_report.summary.uptime_percent == 100
+        and external_ip_report.summary.failed_samples > 0
+    ):
+        diagnoses.append(
+            Diagnosis(
+                code="wan_or_isp_issue",
+                message=(
+                    f"{router_report.target.label} stayed reachable while "
+                    f"{external_ip_report.target.label} failed; likely ISP/WAN issue."
+                ),
+            )
+        )
+
+    if (
+        external_ip_report
+        and hostname_report
+        and external_ip_report.summary.uptime_percent == 100
+        and hostname_report.summary.failed_samples > 0
+    ):
+        diagnoses.append(
+            Diagnosis(
+                code="dns_or_hostname_issue",
+                message=(
+                    f"{external_ip_report.target.label} stayed reachable while "
+                    f"{hostname_report.target.label} failed; likely DNS or hostname resolution issue."
+                ),
+            )
+        )
+
+    failed_target_reports = [
+        target_report
+        for target_report in target_reports
+        if target_report.summary.failed_samples > 0
+    ]
+    if not diagnoses and failed_target_reports:
+        failed_targets = ", ".join(
+            format_target(target_report.target)
+            for target_report in failed_target_reports
+        )
+        diagnoses.append(
+            Diagnosis(
+                code="target_reachability_issue",
+                message=(
+                    f"{failed_targets} had failures without a router/ISP/DNS pattern; "
+                    "likely target-specific reachability issue."
+                ),
+            )
+        )
+
+    if not diagnoses:
+        diagnoses.append(
+            Diagnosis(
+                code="no_clear_issue",
+                message="No clear network issue pattern detected from the configured targets.",
+            )
+        )
+
+    return diagnoses
+
+
+def find_router_report(target_reports: list[TargetReport]) -> TargetReport | None:
+    for target_report in target_reports:
+        label = target_report.target.label.lower()
+        if "router" in label or "gateway" in label:
+            return target_report
+
+    return None
+
+
+def find_external_ip_report(
+    target_reports: list[TargetReport],
+    exclude: TargetReport | None,
+) -> TargetReport | None:
+    for target_report in target_reports:
+        if target_report is exclude:
+            continue
+        if is_ip(target_report.target.host) and not is_private_ip(target_report.target.host):
+            return target_report
+    return None
+
+
+def find_hostname_report(target_reports: list[TargetReport]) -> TargetReport | None:
+    for target_report in target_reports:
+        if not is_ip(target_report.target.host):
+            return target_report
+    return None
+
+
+def is_ip(host: str) -> bool:
+    try:
+        ip_address(host)
+    except ValueError:
+        return False
+    return True
+
+
+def is_private_ip(host: str) -> bool:
+    try:
+        return ip_address(host).is_private
+    except ValueError:
+        return False
+
+
 def format_console_summary(report: SessionReport) -> str:
     summary = report.summary
     lines = [
         "watch4ping report",
-        f"Target: {report.session.target}",
+        f"Targets: {format_session_targets(report.session)}",
         f"Duration: {format_duration(summary.duration_seconds)}",
         f"Samples: {summary.total_samples} "
         f"({summary.successful_samples} ok, {summary.failed_samples} failed)",
@@ -149,6 +379,7 @@ def format_console_summary(report: SessionReport) -> str:
         f"Longest outage: {format_duration(summary.longest_outage_seconds)}",
         f"Latency: {format_latency_summary(summary)}",
         f"Latency spikes: {summary.latency_spike_count}",
+        f"Diagnosis: {report.diagnoses[0].message if report.diagnoses else 'n/a'}",
     ]
     return "\n".join(lines)
 
@@ -158,7 +389,7 @@ def format_markdown_report(report: SessionReport) -> str:
     lines = [
         "# watch4ping report",
         "",
-        f"- Target: `{report.session.target}`",
+        f"- Targets: `{format_session_targets(report.session)}`",
         f"- Started: `{report.session.started_at.isoformat()}`",
         f"- Ended: `{report.session.ended_at.isoformat()}`",
         f"- Duration: `{format_duration(summary.duration_seconds)}`",
@@ -177,9 +408,30 @@ def format_markdown_report(report: SessionReport) -> str:
         f"- Latency: `{format_latency_summary(summary)}`",
         f"- Latency spikes: `{summary.latency_spike_count}`",
         "",
-        "## Outages",
+        "## Diagnosis",
         "",
     ]
+
+    lines.extend(f"- {diagnosis.message}" for diagnosis in report.diagnoses)
+    lines.extend(
+        [
+            "",
+            "## Targets",
+            "",
+            "| Target | Samples | Uptime | Outages | Avg latency | Spikes |",
+            "| --- | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for target_report in report.target_reports:
+        lines.append(format_markdown_target_row(target_report))
+
+    lines.extend(
+        [
+            "",
+            "## Outages",
+            "",
+        ]
+    )
 
     if report.outages:
         lines.extend(
@@ -223,7 +475,7 @@ def format_html_report(report: SessionReport) -> str:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>watch4ping report - {escape(report.session.target)}</title>
+  <title>watch4ping report - {escape(format_session_targets(report.session))}</title>
   <style>
     :root {{
       color-scheme: light;
@@ -316,7 +568,7 @@ def format_html_report(report: SessionReport) -> str:
     <header>
       <h1>watch4ping report</h1>
       <div class="subtitle">
-        Target {escape(report.session.target)} from {escape(report.session.started_at.isoformat())}
+        Targets {escape(format_session_targets(report.session))} from {escape(report.session.started_at.isoformat())}
         to {escape(report.session.ended_at.isoformat())}
       </div>
     </header>
@@ -329,6 +581,16 @@ def format_html_report(report: SessionReport) -> str:
       {html_metric("Longest outage", format_duration(summary.longest_outage_seconds))}
       {html_metric("Latency spikes", str(summary.latency_spike_count))}
     </div>
+
+    <section>
+      <h2>Diagnosis</h2>
+      {format_html_diagnoses(report)}
+    </section>
+
+    <section>
+      <h2>Targets</h2>
+      {format_html_target_table(report)}
+    </section>
 
     <section>
       <h2>Latency</h2>
@@ -362,6 +624,62 @@ def html_metric(label: str, value: str) -> str:
         f'<div class="label">{escape(label)}</div>'
         f'<div class="value">{escape(value)}</div>'
         "</div>"
+    )
+
+
+def format_session_targets(session: MonitorSession) -> str:
+    return ", ".join(
+        f"{target.label}={target.host}" if target.label != target.host else target.host
+        for target in session.targets
+    )
+
+
+def format_markdown_target_row(target_report: TargetReport) -> str:
+    summary = target_report.summary
+    avg_latency = (
+        f"{summary.avg_latency_ms:.1f} ms"
+        if summary.avg_latency_ms is not None
+        else "n/a"
+    )
+    target = format_target(target_report.target)
+    return (
+        f"| `{target}` | `{summary.total_samples}` | `{summary.uptime_percent:.2f}%` | "
+        f"`{summary.outage_count}` | `{avg_latency}` | `{summary.latency_spike_count}` |"
+    )
+
+
+def format_target(target: Target) -> str:
+    if target.label == target.host:
+        return target.host
+    return f"{target.label}={target.host}"
+
+
+def format_html_diagnoses(report: SessionReport) -> str:
+    if not report.diagnoses:
+        return '<p class="empty">No diagnosis available.</p>'
+
+    items = "\n".join(
+        f"<li>{escape(diagnosis.message)}</li>"
+        for diagnosis in report.diagnoses
+    )
+    return f"<ul>{items}</ul>"
+
+
+def format_html_target_table(report: SessionReport) -> str:
+    rows = "\n".join(
+        "<tr>"
+        f"<td>{escape(format_target(target_report.target))}</td>"
+        f"<td>{target_report.summary.total_samples}</td>"
+        f"<td>{target_report.summary.uptime_percent:.2f}%</td>"
+        f"<td>{target_report.summary.outage_count}</td>"
+        f"<td>{format_optional_latency(target_report.summary.avg_latency_ms)}</td>"
+        f"<td>{target_report.summary.latency_spike_count}</td>"
+        "</tr>"
+        for target_report in report.target_reports
+    )
+    return (
+        "<table><thead><tr><th>Target</th><th>Samples</th><th>Uptime</th>"
+        f"<th>Outages</th><th>Avg latency</th><th>Spikes</th></tr></thead><tbody>{rows}</tbody></table>"
     )
 
 
@@ -444,6 +762,7 @@ def format_html_sample_table(report: SessionReport) -> str:
     rows = "\n".join(
         "<tr>"
         f"<td>{sample.sequence}</td>"
+        f"<td>{escape(format_sample_target(sample))}</td>"
         f"<td>{escape(sample.formatted_timestamp)}</td>"
         f"{format_html_sample_status(sample.ok)}"
         f"<td>{format_optional_latency(sample.latency_ms)}</td>"
@@ -452,9 +771,17 @@ def format_html_sample_table(report: SessionReport) -> str:
         for sample in report.session.samples
     )
     return (
-        "<table><thead><tr><th>Sequence</th><th>Timestamp</th><th>Status</th>"
+        "<table><thead><tr><th>Sequence</th><th>Target</th><th>Timestamp</th><th>Status</th>"
         f"<th>Latency</th><th>Error</th></tr></thead><tbody>{rows}</tbody></table>"
     )
+
+
+def format_sample_target(sample: PingSample) -> str:
+    if not sample.target_label and not sample.target_host:
+        return ""
+    if sample.target_label == sample.target_host or not sample.target_label:
+        return sample.target_host or ""
+    return f"{sample.target_label}={sample.target_host}"
 
 
 def format_optional_latency(latency_ms: float | None) -> str:

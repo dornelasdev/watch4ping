@@ -24,6 +24,15 @@ python -m pip install -e ".[dev]"
 watch4ping -t 1.1.1.1 -i 2 -w 1
 ```
 
+Targets may be labeled and repeated:
+
+```bash
+watch4ping -t router=192.168.1.1 -t cloudflare=1.1.1.1 -t dns=google.com
+```
+
+Multi-target reports include per-target summaries and basic diagnosis hints for
+local network, ISP/WAN, and DNS-style failure patterns.
+
 Stop the monitor with `Ctrl-C`. The tool prints a summary, then asks whether to
 write a report and which format to use.
 

@@ -13,12 +13,26 @@ class PingResult:
 
 
 @dataclass(frozen=True)
+class Target:
+    label: str
+    host: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "label": self.label,
+            "host": self.host,
+        }
+
+
+@dataclass(frozen=True)
 class PingSample:
     sequence: int
     timestamp: datetime
     ok: bool
     latency_ms: float | None = None
     error: str | None = None
+    target_label: str | None = None
+    target_host: str | None = None
 
     @property
     def formatted_timestamp(self) -> str:
@@ -32,12 +46,14 @@ class PingSample:
             "ok": self.ok,
             "latency_ms": self.latency_ms,
             "error": self.error,
+            "target_label": self.target_label,
+            "target_host": self.target_host,
         }
 
 
 @dataclass(frozen=True)
 class MonitorSession:
-    target: str
+    targets: tuple[Target, ...]
     interval_seconds: float
     timeout_seconds: float
     fail_threshold: int
@@ -45,9 +61,14 @@ class MonitorSession:
     ended_at: datetime
     samples: tuple[PingSample, ...] = field(default_factory=tuple)
 
+    @property
+    def target(self) -> str:
+        return self.targets[0].host
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "target": self.target,
+            "targets": [target.to_dict() for target in self.targets],
             "interval_seconds": self.interval_seconds,
             "timeout_seconds": self.timeout_seconds,
             "fail_threshold": self.fail_threshold,
@@ -80,6 +101,8 @@ class LatencySpike:
     formatted_timestamp: str
     latency_ms: float
     threshold_ms: float
+    target_label: str | None = None
+    target_host: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -88,6 +111,8 @@ class LatencySpike:
             "formatted_timestamp": self.formatted_timestamp,
             "latency_ms": self.latency_ms,
             "threshold_ms": self.threshold_ms,
+            "target_label": self.target_label,
+            "target_host": self.target_host,
         }
 
 
@@ -132,12 +157,42 @@ class ReportSummary:
 
 
 @dataclass(frozen=True)
+class TargetReport:
+    target: Target
+    summary: ReportSummary
+    outages: tuple[Outage, ...]
+    latency_spikes: tuple[LatencySpike, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "target": self.target.to_dict(),
+            "summary": self.summary.to_dict(),
+            "outages": [outage.to_dict() for outage in self.outages],
+            "latency_spikes": [spike.to_dict() for spike in self.latency_spikes],
+        }
+
+
+@dataclass(frozen=True)
+class Diagnosis:
+    code: str
+    message: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "code": self.code,
+            "message": self.message,
+        }
+
+
+@dataclass(frozen=True)
 class SessionReport:
     schema_version: str
     session: MonitorSession
     summary: ReportSummary
     outages: tuple[Outage, ...]
     latency_spikes: tuple[LatencySpike, ...]
+    target_reports: tuple[TargetReport, ...]
+    diagnoses: tuple[Diagnosis, ...]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -146,4 +201,6 @@ class SessionReport:
             "summary": self.summary.to_dict(),
             "outages": [outage.to_dict() for outage in self.outages],
             "latency_spikes": [spike.to_dict() for spike in self.latency_spikes],
+            "target_reports": [target_report.to_dict() for target_report in self.target_reports],
+            "diagnoses": [diagnosis.to_dict() for diagnosis in self.diagnoses],
         }

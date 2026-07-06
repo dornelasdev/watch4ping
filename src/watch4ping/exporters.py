@@ -44,6 +44,8 @@ def write_csv(report: SessionReport, path: Path) -> None:
             csv_file,
             fieldnames=(
                 "sequence",
+                "target_label",
+                "target_host",
                 "timestamp",
                 "formatted_timestamp",
                 "ok",
@@ -56,6 +58,8 @@ def write_csv(report: SessionReport, path: Path) -> None:
             writer.writerow(
                 {
                     "sequence": sample.sequence,
+                    "target_label": sample.target_label,
+                    "target_host": sample.target_host,
                     "timestamp": sample.timestamp.isoformat(),
                     "formatted_timestamp": sample.formatted_timestamp,
                     "ok": sample.ok,

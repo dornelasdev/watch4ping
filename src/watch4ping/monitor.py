@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Protocol
 
-from .models import MonitorSession, PingResult, PingSample
+from .models import MonitorSession, PingResult, PingSample, Target
 
 
 class PingProbe(Protocol):
@@ -16,11 +16,15 @@ class PingProbe(Protocol):
 
 @dataclass(frozen=True)
 class MonitorConfig:
-    target: str
+    targets: tuple[Target, ...]
     interval_seconds: float = 2.0
     timeout_seconds: float = 1.0
     fail_threshold: int = 3
     duration_seconds: float | None = None
+
+    @property
+    def target(self) -> str:
+        return self.targets[0].host
 
 
 def run_monitor(
@@ -54,19 +58,16 @@ def run_monitor(
             if sleep_seconds > 0:
                 time.sleep(sleep_seconds)
 
-            timestamp = datetime.now(timezone.utc)
-            result = probe.ping(config.target)
-            sample = PingSample(
+            samples_for_sequence = probe_targets(
                 sequence=sequence,
-                timestamp=timestamp,
-                ok=result.ok,
-                latency_ms=result.latency_ms,
-                error=result.error,
+                targets=config.targets,
+                probe=probe,
             )
-            samples.append(sample)
+            samples.extend(samples_for_sequence)
 
             if not quiet:
-                print_sample(sample)
+                for sample in samples_for_sequence:
+                    print_sample(sample)
 
             sequence += 1
             next_probe_at += config.interval_seconds
@@ -75,7 +76,7 @@ def run_monitor(
 
     ended_at = datetime.now(timezone.utc)
     return MonitorSession(
-        target=config.target,
+        targets=config.targets,
         interval_seconds=config.interval_seconds,
         timeout_seconds=config.timeout_seconds,
         fail_threshold=config.fail_threshold,
@@ -83,6 +84,31 @@ def run_monitor(
         ended_at=ended_at,
         samples=tuple(samples),
     )
+
+
+def probe_targets(
+    sequence: int,
+    targets: tuple[Target, ...],
+    probe: PingProbe,
+) -> list[PingSample]:
+    samples: list[PingSample] = []
+
+    for target in targets:
+        timestamp = datetime.now(timezone.utc)
+        result = probe.ping(target.host)
+        samples.append(
+            PingSample(
+                sequence=sequence,
+                timestamp=timestamp,
+                ok=result.ok,
+                latency_ms=result.latency_ms,
+                error=result.error,
+                target_label=target.label,
+                target_host=target.host,
+            )
+        )
+
+    return samples
 
 
 def should_stop_before_next_sample(
@@ -99,9 +125,10 @@ def should_stop_before_next_sample(
 
 
 def print_sample(sample: PingSample) -> None:
+    target = f" {sample.target_label}" if sample.target_label else ""
     if sample.ok:
         latency = f"{sample.latency_ms:.1f} ms" if sample.latency_ms is not None else "ok"
-        message = f"[{sample.sequence}] OK {latency}"
+        message = f"[{sample.sequence}]{target} OK {latency}"
     else:
-        message = f"[{sample.sequence}] FAIL {sample.error or 'no response'}"
+        message = f"[{sample.sequence}]{target} FAIL {sample.error or 'no response'}"
     print(message, file=sys.stderr)

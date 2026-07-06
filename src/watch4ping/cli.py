@@ -6,6 +6,7 @@ import re
 from typing import Iterable
 
 from .exporters import write_reports
+from .models import Target
 from .monitor import MonitorConfig, run_monitor
 from .ping import SystemPingProbe
 from .report import build_report, format_console_summary
@@ -22,8 +23,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-t",
         "--target",
-        default="1.1.1.1",
-        help="Host or IP address to ping. Defaults to 1.1.1.1.",
+        dest="targets",
+        action="append",
+        type=parse_target,
+        help=(
+            "Host or labeled target to ping, such as 1.1.1.1 or "
+            "cloudflare=1.1.1.1. May be repeated. Defaults to 1.1.1.1."
+        ),
     )
     parser.add_argument(
         "-i",
@@ -83,8 +89,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.fail_threshold <= 0:
         parser.error("--fail-threshold must be greater than 0")
 
+    try:
+        targets = normalize_targets(args.targets)
+    except argparse.ArgumentTypeError as exc:
+        parser.error(str(exc))
+
     config = MonitorConfig(
-        target=args.target,
+        targets=targets,
         interval_seconds=args.interval,
         timeout_seconds=args.timeout,
         fail_threshold=args.fail_threshold,
@@ -167,6 +178,30 @@ def normalize_formats(formats: Iterable[str] | None) -> tuple[str, ...]:
     return tuple(formats)
 
 
+def parse_target(value: str) -> Target:
+    raw_value = value.strip()
+    if not raw_value:
+        raise argparse.ArgumentTypeError("target cannot be empty")
+
+    if "=" in raw_value:
+        label, host = (part.strip() for part in raw_value.split("=", 1))
+        if not label or not host:
+            raise argparse.ArgumentTypeError("labeled target must look like label=host")
+        return Target(label=label, host=host)
+
+    return Target(label=raw_value, host=raw_value)
+
+
+def normalize_targets(targets: Iterable[Target] | None) -> tuple[Target, ...]:
+    normalized = tuple(targets or (Target(label="1.1.1.1", host="1.1.1.1"),))
+    labels = [target.label for target in normalized]
+    duplicate_labels = {label for label in labels if labels.count(label) > 1}
+    if duplicate_labels:
+        duplicates = ", ".join(sorted(duplicate_labels))
+        raise argparse.ArgumentTypeError(f"target labels must be unique: {duplicates}")
+    return normalized
+
+
 def parse_duration_seconds(value: str) -> float:
     match = DURATION_RE.match(value.strip().lower())
     if not match:
@@ -189,8 +224,21 @@ def build_start_message(config: MonitorConfig) -> str:
     )
     stop_hint = "Press Ctrl-C to stop early." if config.duration_seconds else "Press Ctrl-C to stop."
     return (
-        f"Monitoring {config.target} every {config.interval_seconds:g}s "
+        f"Monitoring {format_targets_summary(config.targets)} every {config.interval_seconds:g}s "
         f"(timeout {config.timeout_seconds:g}s){duration}. {stop_hint}"
+    )
+
+
+def format_targets_summary(targets: tuple[Target, ...]) -> str:
+    if len(targets) == 1:
+        return targets[0].host
+    return f"{len(targets)} targets ({format_target_list(targets)})"
+
+
+def format_target_list(targets: tuple[Target, ...]) -> str:
+    return ", ".join(
+        f"{target.label}={target.host}" if target.label != target.host else target.host
+        for target in targets
     )
 
 
