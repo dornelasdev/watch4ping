@@ -4,7 +4,7 @@ import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Protocol
+from typing import TextIO, Protocol
 
 from .models import MonitorSession, PingResult, PingSample, Target
 
@@ -66,8 +66,7 @@ def run_monitor(
             samples.extend(samples_for_sequence)
 
             if not quiet:
-                for sample in samples_for_sequence:
-                    print_sample(sample)
+                print_sample_group(samples_for_sequence)
 
             sequence += 1
             next_probe_at += config.interval_seconds
@@ -124,11 +123,34 @@ def should_stop_before_next_sample(
     )
 
 
-def print_sample(sample: PingSample) -> None:
-    target = f" {sample.target_label}" if sample.target_label else ""
+def print_sample_group(samples: list[PingSample], stream: TextIO = sys.stderr) -> None:
+    if not samples:
+        return
+
+    sequence = samples[0].sequence
+    timestamp = samples[0].formatted_timestamp
+    print(f"[{sequence}] {timestamp}", file=stream)
+
+    target_width = max(len(format_sample_target(sample)) for sample in samples)
+    for sample in samples:
+        print(f"  {format_sample_line(sample, target_width)}", file=stream)
+
+
+def format_sample_line(sample: PingSample, target_width: int | None = None) -> str:
+    target = format_sample_target(sample)
+    if target_width is not None:
+        target = target.ljust(target_width)
+
     if sample.ok:
         latency = f"{sample.latency_ms:.1f} ms" if sample.latency_ms is not None else "ok"
-        message = f"[{sample.sequence}]{target} OK {latency}"
-    else:
-        message = f"[{sample.sequence}]{target} FAIL {sample.error or 'no response'}"
-    print(message, file=sys.stderr)
+        return f"{target}  OK    {latency}"
+
+    return f"{target}  FAIL  {sample.error or 'no response'}"
+
+
+def format_sample_target(sample: PingSample) -> str:
+    if sample.target_label:
+        return sample.target_label
+    if sample.target_host:
+        return sample.target_host
+    return "target"

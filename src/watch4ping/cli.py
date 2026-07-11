@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 from typing import Iterable
 
+from .config import DEFAULT_CONFIG_PATH, ProfileConfig, load_config
 from .exporters import write_reports
 from .models import Target
 from .monitor import MonitorConfig, run_monitor
@@ -35,20 +36,20 @@ def build_parser() -> argparse.ArgumentParser:
         "-i",
         "--interval",
         type=float,
-        default=2.0,
+        default=None,
         help="Seconds between ping attempts. Defaults to 2.",
     )
     parser.add_argument(
         "-w",
         "--timeout",
         type=float,
-        default=1.0,
+        default=None,
         help="Seconds to wait for one ping response. Defaults to 1.",
     )
     parser.add_argument(
         "--fail-threshold",
         type=int,
-        default=3,
+        default=None,
         help="Consecutive failed samples required to count as an outage. Defaults to 3.",
     )
     parser.add_argument(
@@ -64,11 +65,38 @@ def build_parser() -> argparse.ArgumentParser:
         help="Directory where reports will be written. Defaults to reports/.",
     )
     parser.add_argument(
+        "--config",
+        type=Path,
+        default=DEFAULT_CONFIG_PATH,
+        help="Path to a watch4ping TOML config file. Defaults to watch4ping.toml.",
+    )
+    parser.add_argument(
+        "--profile",
+        help="Config profile to use from the selected config file.",
+    )
+    parser.add_argument(
+        "--list-profiles",
+        action="store_true",
+        help="List profiles from the selected config file and exit.",
+    )
+    parser.add_argument(
         "--format",
         dest="formats",
         action="append",
         choices=("json", "csv", "md", "html", "all"),
         help="Report format to write without prompting. May be repeated.",
+    )
+    report_prompt_group = parser.add_mutually_exclusive_group()
+    report_prompt_group.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="Write reports without prompting. Uses all formats unless --format is provided.",
+    )
+    report_prompt_group.add_argument(
+        "--no-report",
+        action="store_true",
+        help="Do not prompt and do not write reports.",
     )
     parser.add_argument(
         "--quiet",
@@ -82,26 +110,33 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    if args.interval <= 0:
-        parser.error("--interval must be greater than 0")
-    if args.timeout <= 0:
-        parser.error("--timeout must be greater than 0")
-    if args.fail_threshold <= 0:
-        parser.error("--fail-threshold must be greater than 0")
+    try:
+        loaded_config = load_config(args.config)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    if args.list_profiles:
+        print_profiles(loaded_config.profiles)
+        return 0
+
+    profile = None
+    if args.profile:
+        profile = loaded_config.profiles.get(args.profile)
+        if profile is None:
+            parser.error(f"profile {args.profile!r} not found in {args.config}")
 
     try:
-        targets = normalize_targets(args.targets)
+        settings = resolve_monitor_settings(args, profile)
     except argparse.ArgumentTypeError as exc:
         parser.error(str(exc))
 
     config = MonitorConfig(
-        targets=targets,
-        interval_seconds=args.interval,
-        timeout_seconds=args.timeout,
-        fail_threshold=args.fail_threshold,
+        targets=settings.targets,
+        interval_seconds=settings.interval_seconds,
+        timeout_seconds=settings.timeout_seconds,
+        fail_threshold=settings.fail_threshold,
         duration_seconds=args.duration,
     )
-    formats = normalize_formats(args.formats)
 
     print(build_start_message(config))
 
@@ -115,18 +150,14 @@ def main(argv: list[str] | None = None) -> int:
     print()
     print(format_console_summary(report))
 
-    if args.formats:
-        written = write_reports(report, args.output_dir, formats)
+    report_formats = resolve_report_formats(args)
+    if report_formats:
+        written = write_reports(report, args.output_dir, report_formats)
         print_written_reports(written)
         return 0
 
-    if prompt_yes_no("Write a report? [y/n]: "):
-        selected_formats = prompt_report_formats()
-        written = write_reports(report, args.output_dir, selected_formats)
-        print_written_reports(written)
-    else:
-        print()
-        print("No report written.")
+    print()
+    print("No report written.")
 
     return 0
 
@@ -135,6 +166,15 @@ def print_written_reports(paths: Iterable[Path]) -> None:
     print()
     for path in paths:
         print(f"Wrote {path}")
+
+
+def print_profiles(profiles: dict[str, ProfileConfig]) -> None:
+    if not profiles:
+        print("No profiles found.")
+        return
+
+    for name in sorted(profiles):
+        print(name)
 
 
 def prompt_yes_no(prompt: str) -> bool:
@@ -176,6 +216,54 @@ def normalize_formats(formats: Iterable[str] | None) -> tuple[str, ...]:
     if not formats or "all" in formats:
         return ("json", "csv", "md", "html")
     return tuple(formats)
+
+
+def resolve_report_formats(args) -> tuple[str, ...] | None:
+    if args.no_report:
+        return None
+    if args.formats or args.yes:
+        return normalize_formats(args.formats)
+    if prompt_yes_no("Write a report? [y/n]: "):
+        return prompt_report_formats()
+    return None
+
+
+def resolve_monitor_settings(args, profile: ProfileConfig | None) -> MonitorConfig:
+    targets = normalize_targets(
+        args.targets if args.targets is not None else (profile.targets if profile else None)
+    )
+    interval_seconds = args.interval
+    if interval_seconds is None:
+        interval_seconds = profile.interval_seconds if profile else None
+    if interval_seconds is None:
+        interval_seconds = 2.0
+
+    timeout_seconds = args.timeout
+    if timeout_seconds is None:
+        timeout_seconds = profile.timeout_seconds if profile else None
+    if timeout_seconds is None:
+        timeout_seconds = 1.0
+
+    fail_threshold = args.fail_threshold
+    if fail_threshold is None:
+        fail_threshold = profile.fail_threshold if profile else None
+    if fail_threshold is None:
+        fail_threshold = 3
+
+    if interval_seconds <= 0:
+        raise argparse.ArgumentTypeError("--interval must be greater than 0")
+    if timeout_seconds <= 0:
+        raise argparse.ArgumentTypeError("--timeout must be greater than 0")
+    if fail_threshold <= 0:
+        raise argparse.ArgumentTypeError("--fail-threshold must be greater than 0")
+
+    return MonitorConfig(
+        targets=targets,
+        interval_seconds=interval_seconds,
+        timeout_seconds=timeout_seconds,
+        fail_threshold=fail_threshold,
+        duration_seconds=args.duration,
+    )
 
 
 def parse_target(value: str) -> Target:

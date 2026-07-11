@@ -1,5 +1,13 @@
-from watch4ping.models import PingResult, Target
-from watch4ping.monitor import probe_targets, should_stop_before_next_sample
+from datetime import datetime, timezone
+from io import StringIO
+
+from watch4ping.models import PingResult, PingSample, Target
+from watch4ping.monitor import (
+    format_sample_line,
+    print_sample_group,
+    probe_targets,
+    should_stop_before_next_sample,
+)
 
 
 class FakeProbe:
@@ -30,6 +38,49 @@ def test_probe_targets_records_one_sample_per_target():
     assert samples[0].latency_ms == 2.5
     assert samples[1].ok is False
     assert samples[1].error == "timeout"
+
+
+def test_format_sample_line_formats_successful_sample():
+    sample = PingSample(
+        sequence=1,
+        timestamp=datetime(2026, 7, 11, tzinfo=timezone.utc),
+        ok=True,
+        latency_ms=12.345,
+        target_label="cloudflare",
+        target_host="1.1.1.1",
+    )
+
+    assert format_sample_line(sample) == "cloudflare  OK    12.3 ms"
+
+
+def test_print_sample_group_formats_round_output():
+    stream = StringIO()
+    samples = [
+        PingSample(
+            sequence=2,
+            timestamp=datetime(2026, 7, 11, 12, 0, 0, tzinfo=timezone.utc),
+            ok=True,
+            latency_ms=2.5,
+            target_label="router",
+            target_host="192.168.1.1",
+        ),
+        PingSample(
+            sequence=2,
+            timestamp=datetime(2026, 7, 11, 12, 0, 0, tzinfo=timezone.utc),
+            ok=False,
+            error="timeout",
+            target_label="cloudflare",
+            target_host="1.1.1.1",
+        ),
+    ]
+
+    print_sample_group(samples, stream=stream)
+
+    assert stream.getvalue() == (
+        "[2] 2026-07-11 12:00:00 UTC\n"
+        "  router      OK    2.5 ms\n"
+        "  cloudflare  FAIL  timeout\n"
+    )
 
 
 def test_should_stop_before_next_sample_allows_initial_sample():

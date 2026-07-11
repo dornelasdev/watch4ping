@@ -1,0 +1,17 @@
+[profile.home]
+# Update the router target to match your local gateway.
+# Common values are 192.168.1.1, 192.168.0.1, or 10.0.0.1.
+# Add your router/gateway IP to this targets TOML array.
+#
+# Recommended target roles:
+# - router: local network/router reachability
+# - cloudflare: external IP reachability
+# - dns: hostname/DNS reachability
+targets = [
+  "cloudflare=1.1.1.1",
+  "dns=google.com",
+]
+
+interval = 2
+timeout = 1
+fail_threshold = 3
