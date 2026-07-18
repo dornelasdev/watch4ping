@@ -12,6 +12,7 @@ Early project scaffold. The first storage format is file-based:
 - CSV: raw samples for spreadsheets and analysis
 - Markdown: human-readable summary
 - HTML: self-contained visual report
+- `reports/index.json`: compact history of generated report sessions
 
 SQLite is intentionally left for a future history/dashboard mode.
 
@@ -63,6 +64,9 @@ You can also write all report formats without prompting:
 watch4ping --profile home --duration 30s --yes
 ```
 
+Profile runs include the profile name in report filenames, such as
+`watch4ping-home-20260718-120000.html`.
+
 Or skip report writing:
 
 ```bash
@@ -83,6 +87,20 @@ List available profiles:
 
 ```bash
 watch4ping --list-profiles
+```
+
+Show recent report history from `reports/index.json`:
+
+```bash
+watch4ping history
+watch4ping history --last 5
+```
+
+Compare recent report sessions:
+
+```bash
+watch4ping compare
+watch4ping compare --last 2
 ```
 
 ## Development

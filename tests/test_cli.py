@@ -3,6 +3,8 @@ import pytest
 from watch4ping.cli import (
     build_parser,
     build_start_message,
+    format_compare,
+    format_history,
     normalize_formats,
     normalize_targets,
     parse_duration_seconds,
@@ -51,6 +53,28 @@ def test_parser_accepts_profile_flags():
     assert str(args.config) == "custom.toml"
     assert args.profile == "home"
     assert args.list_profiles is True
+
+
+def test_parser_accepts_history_command():
+    args = build_parser().parse_args(["history", "--output-dir", "custom-reports", "--last", "3"])
+
+    assert args.command == "history"
+    assert str(args.output_dir) == "custom-reports"
+    assert args.last == 3
+
+
+def test_parser_accepts_compare_command():
+    args = build_parser().parse_args(["compare", "--output-dir", "custom-reports", "--last", "2"])
+
+    assert args.command == "compare"
+    assert str(args.output_dir) == "custom-reports"
+    assert args.last == 2
+
+
+def test_parser_leaves_last_unset_by_default():
+    args = build_parser().parse_args(["compare"])
+
+    assert args.last is None
 
 
 def test_parser_accepts_prompt_control_flags():
@@ -208,3 +232,130 @@ def test_build_start_message_mentions_multiple_targets():
     message = build_start_message(config)
 
     assert "2 targets (router=192.168.1.1, cloudflare=1.1.1.1)" in message
+
+
+def test_format_history_prints_recent_sessions_first():
+    history = format_history(
+        {
+            "sessions": [
+                {
+                    "started_at": "2026-07-18T12:00:00+00:00",
+                    "profile": "home",
+                    "targets": [{"label": "cloudflare", "host": "1.1.1.1"}],
+                    "summary": {"uptime_percent": 100.0, "failed_samples": 0},
+                    "reports": {"html": "watch4ping-home-20260718-120000.html"},
+                },
+                {
+                    "started_at": "2026-07-18T12:05:00+00:00",
+                    "profile": None,
+                    "targets": [{"label": "dns", "host": "google.com"}],
+                    "summary": {"uptime_percent": 50.0, "failed_samples": 2},
+                    "reports": {"json": "watch4ping-20260718-120500.json"},
+                },
+            ]
+        },
+        last=2,
+    )
+
+    lines = history.splitlines()
+
+    assert lines[0] == "watch4ping history"
+    assert "2026-07-18T12:05:00+00:00 profile=manual" in lines[1]
+    assert "uptime=50.00% failed=2 targets=dns=google.com reports=json" in lines[1]
+    assert "2026-07-18T12:00:00+00:00 profile=home" in lines[2]
+
+
+def test_format_history_handles_empty_index():
+    assert format_history({"sessions": []}) == "No report history found."
+
+
+def test_format_compare_prints_deltas_between_selected_sessions():
+    comparison = format_compare(
+        {
+            "sessions": [
+                build_history_session(
+                    started_at="2026-07-18T12:00:00+00:00",
+                    profile="home",
+                    uptime_percent=90.0,
+                    failed_samples=3,
+                    avg_latency_ms=20.0,
+                    worst_target={"label": "dns", "host": "google.com"},
+                ),
+                build_history_session(
+                    started_at="2026-07-18T12:05:00+00:00",
+                    profile="home",
+                    uptime_percent=100.0,
+                    failed_samples=0,
+                    avg_latency_ms=15.5,
+                    worst_target={"label": "cloudflare", "host": "1.1.1.1"},
+                ),
+            ]
+        },
+        last=2,
+    )
+
+    assert comparison.splitlines() == [
+        "watch4ping compare",
+        "Previous: 2026-07-18T12:00:00+00:00 profile=home",
+        "Current:  2026-07-18T12:05:00+00:00 profile=home",
+        "Uptime: 90.00% -> 100.00% (+10 pp)",
+        "Failed samples: 3 -> 0 (-3)",
+        "Avg latency: 20.0 ms -> 15.5 ms (-4.50 ms)",
+        "Worst target: dns=google.com -> cloudflare=1.1.1.1",
+    ]
+
+
+def test_format_compare_uses_last_window():
+    comparison = format_compare(
+        {
+            "sessions": [
+                build_history_session("first", None, 100.0, 0, 10.0),
+                build_history_session("second", None, 95.0, 1, 20.0),
+                build_history_session("third", None, 90.0, 2, 30.0),
+            ]
+        },
+        last=2,
+    )
+
+    assert "Previous: second profile=manual" in comparison
+    assert "Current:  third profile=manual" in comparison
+
+
+def test_format_compare_handles_missing_latency():
+    comparison = format_compare(
+        {
+            "sessions": [
+                build_history_session("first", None, 100.0, 0, None),
+                build_history_session("second", None, 100.0, 0, 10.0),
+            ]
+        },
+        last=2,
+    )
+
+    assert "Avg latency: n/a" in comparison
+
+
+def test_format_compare_requires_two_sessions():
+    assert format_compare({"sessions": []}) == "Need at least 2 report sessions to compare."
+
+
+def build_history_session(
+    started_at,
+    profile,
+    uptime_percent,
+    failed_samples,
+    avg_latency_ms,
+    worst_target=None,
+):
+    return {
+        "started_at": started_at,
+        "profile": profile,
+        "targets": [{"label": "cloudflare", "host": "1.1.1.1"}],
+        "summary": {
+            "uptime_percent": uptime_percent,
+            "failed_samples": failed_samples,
+            "avg_latency_ms": avg_latency_ms,
+        },
+        "worst_target": {"target": worst_target} if worst_target else None,
+        "reports": {"json": "report.json"},
+    }

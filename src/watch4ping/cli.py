@@ -6,7 +6,7 @@ import re
 from typing import Iterable
 
 from .config import DEFAULT_CONFIG_PATH, ProfileConfig, load_config
-from .exporters import write_reports
+from .exporters import read_report_index, write_reports
 from .models import Target
 from .monitor import MonitorConfig, run_monitor
 from .ping import SystemPingProbe
@@ -20,6 +20,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="watch4ping",
         description="Monitor an internet connection until Ctrl-C and write a report.",
+    )
+    parser.add_argument(
+        "command",
+        nargs="?",
+        choices=("monitor", "history", "compare"),
+        default="monitor",
+        help="Command to run. Defaults to monitor.",
     )
     parser.add_argument(
         "-t",
@@ -103,12 +110,32 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Only print start and final report information.",
     )
+    parser.add_argument(
+        "--last",
+        type=int,
+        default=None,
+        help="Number of recent entries to show or compare. Defaults to 10 for history and 2 for compare.",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if args.command == "history":
+        try:
+            print_history(args.output_dir, args.last)
+        except ValueError as exc:
+            parser.error(str(exc))
+        return 0
+
+    if args.command == "compare":
+        try:
+            print_compare(args.output_dir, args.last)
+        except ValueError as exc:
+            parser.error(str(exc))
+        return 0
 
     try:
         loaded_config = load_config(args.config)
@@ -152,7 +179,7 @@ def main(argv: list[str] | None = None) -> int:
 
     report_formats = resolve_report_formats(args)
     if report_formats:
-        written = write_reports(report, args.output_dir, report_formats)
+        written = write_reports(report, args.output_dir, report_formats, profile_name=args.profile)
         print_written_reports(written)
         return 0
 
@@ -166,6 +193,132 @@ def print_written_reports(paths: Iterable[Path]) -> None:
     print()
     for path in paths:
         print(f"Wrote {path}")
+
+
+def print_history(output_dir: Path, last: int | None) -> None:
+    last = 10 if last is None else last
+    if last <= 0:
+        raise ValueError("--last must be greater than 0")
+
+    index_data = read_report_index(output_dir / "index.json")
+    print(format_history(index_data, last))
+
+
+def print_compare(output_dir: Path, last: int | None) -> None:
+    last = 2 if last is None else last
+    if last < 2:
+        raise ValueError("--last must be at least 2 for compare")
+
+    index_data = read_report_index(output_dir / "index.json")
+    print(format_compare(index_data, last))
+
+
+def format_history(index_data: dict, last: int = 10) -> str:
+    sessions = index_data.get("sessions", [])
+    if not sessions:
+        return "No report history found."
+
+    recent_sessions = list(reversed(sessions[-last:]))
+    lines = ["watch4ping history"]
+    for index, session in enumerate(recent_sessions, start=1):
+        summary = session.get("summary", {})
+        profile = session.get("profile") or "manual"
+        targets = format_history_targets(session.get("targets", []))
+        reports = format_history_reports(session.get("reports", {}))
+        lines.append(
+            f"{index}. {session.get('started_at', 'unknown')} "
+            f"profile={profile} uptime={summary.get('uptime_percent', 0):.2f}% "
+            f"failed={summary.get('failed_samples', 0)} targets={targets} reports={reports}"
+        )
+    return "\n".join(lines)
+
+
+def format_compare(index_data: dict, last: int = 2) -> str:
+    sessions = index_data.get("sessions", [])
+    if len(sessions) < 2:
+        return "Need at least 2 report sessions to compare."
+
+    selected_sessions = sessions[-last:]
+    previous = selected_sessions[0]
+    current = selected_sessions[-1]
+    previous_summary = previous.get("summary", {})
+    current_summary = current.get("summary", {})
+
+    lines = [
+        "watch4ping compare",
+        f"Previous: {previous.get('started_at', 'unknown')} profile={previous.get('profile') or 'manual'}",
+        f"Current:  {current.get('started_at', 'unknown')} profile={current.get('profile') or 'manual'}",
+        f"Uptime: {format_percent_delta(previous_summary, current_summary, 'uptime_percent')}",
+        f"Failed samples: {format_number_delta(previous_summary, current_summary, 'failed_samples')}",
+        f"Avg latency: {format_latency_delta(previous_summary, current_summary)}",
+        f"Worst target: {format_worst_target_change(previous, current)}",
+    ]
+    return "\n".join(lines)
+
+
+def format_percent_delta(previous: dict, current: dict, key: str) -> str:
+    previous_value = float(previous.get(key, 0.0) or 0.0)
+    current_value = float(current.get(key, 0.0) or 0.0)
+    return f"{previous_value:.2f}% -> {current_value:.2f}% ({format_signed(current_value - previous_value)} pp)"
+
+
+def format_number_delta(previous: dict, current: dict, key: str) -> str:
+    previous_value = int(previous.get(key, 0) or 0)
+    current_value = int(current.get(key, 0) or 0)
+    return f"{previous_value} -> {current_value} ({format_signed(current_value - previous_value)})"
+
+
+def format_latency_delta(previous: dict, current: dict) -> str:
+    previous_value = previous.get("avg_latency_ms")
+    current_value = current.get("avg_latency_ms")
+    if previous_value is None or current_value is None:
+        return "n/a"
+    previous_latency = float(previous_value)
+    current_latency = float(current_value)
+    return (
+        f"{previous_latency:.1f} ms -> {current_latency:.1f} ms "
+        f"({format_signed(current_latency - previous_latency)} ms)"
+    )
+
+
+def format_signed(value: float) -> str:
+    if float(value).is_integer():
+        return f"{int(value):+d}"
+    return f"{value:+.2f}"
+
+
+def format_worst_target_change(previous: dict, current: dict) -> str:
+    previous_target = format_index_worst_target(previous.get("worst_target"))
+    current_target = format_index_worst_target(current.get("worst_target"))
+    return f"{previous_target} -> {current_target}"
+
+
+def format_index_worst_target(worst_target: dict | None) -> str:
+    if not worst_target:
+        return "n/a"
+    target = worst_target.get("target", {})
+    label = target.get("label")
+    host = target.get("host")
+    if label and host and label != host:
+        return f"{label}={host}"
+    return str(host or label or "n/a")
+
+
+def format_history_targets(targets: list[dict]) -> str:
+    if not targets:
+        return "n/a"
+    return ", ".join(
+        f"{target.get('label')}={target.get('host')}"
+        if target.get("label") != target.get("host")
+        else str(target.get("host"))
+        for target in targets
+    )
+
+
+def format_history_reports(reports: dict) -> str:
+    if not reports:
+        return "n/a"
+    return ", ".join(sorted(reports))
 
 
 def print_profiles(profiles: dict[str, ProfileConfig]) -> None:
