@@ -10,6 +10,7 @@ from .models import (
     MonitorSession,
     Outage,
     PingSample,
+    ReportMetadata,
     ReportSummary,
     SessionReport,
     Target,
@@ -17,10 +18,14 @@ from .models import (
 )
 
 
-REPORT_SCHEMA_VERSION = "3"
+REPORT_SCHEMA_VERSION = "4"
 
 
-def build_report(session: MonitorSession) -> SessionReport:
+def build_report(
+    session: MonitorSession,
+    profile_name: str | None = None,
+    config_path: str | None = None,
+) -> SessionReport:
     target_reports = build_target_reports(session)
     outages = detect_outages(session.samples, session.fail_threshold, session.interval_seconds)
     latency_spikes = detect_latency_spikes(
@@ -44,6 +49,7 @@ def build_report(session: MonitorSession) -> SessionReport:
         latency_spikes=tuple(latency_spikes),
         target_reports=tuple(target_reports),
         diagnoses=tuple(diagnose_session(session, target_reports)),
+        metadata=ReportMetadata(profile_name=profile_name, config_path=config_path),
     )
 
 
@@ -389,6 +395,8 @@ def format_markdown_report(report: SessionReport) -> str:
     lines = [
         "# watch4ping report",
         "",
+        f"- Profile: `{format_report_profile(report)}`",
+        f"- Config: `{format_report_config(report)}`",
         f"- Targets: `{format_session_targets(report.session)}`",
         f"- Started: `{report.session.started_at.isoformat()}`",
         f"- Ended: `{report.session.ended_at.isoformat()}`",
@@ -571,6 +579,9 @@ def format_html_report(report: SessionReport) -> str:
         Targets {escape(format_session_targets(report.session))} from {escape(report.session.started_at.isoformat())}
         to {escape(report.session.ended_at.isoformat())}
       </div>
+      <div class="subtitle">
+        Profile {escape(format_report_profile(report))} | Config {escape(format_report_config(report))}
+      </div>
     </header>
 
     <div class="grid">
@@ -632,6 +643,14 @@ def format_session_targets(session: MonitorSession) -> str:
         f"{target.label}={target.host}" if target.label != target.host else target.host
         for target in session.targets
     )
+
+
+def format_report_profile(report: SessionReport) -> str:
+    return report.metadata.profile_name or "manual"
+
+
+def format_report_config(report: SessionReport) -> str:
+    return report.metadata.config_path or "n/a"
 
 
 def format_markdown_target_row(target_report: TargetReport) -> str:

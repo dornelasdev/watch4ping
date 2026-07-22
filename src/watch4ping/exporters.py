@@ -21,6 +21,7 @@ def write_reports(
     profile_name: str | None = None,
 ) -> list[Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
+    profile_name = profile_name if profile_name is not None else report.metadata.profile_name
     base_name = build_report_base_name(report, profile_name)
     written: list[Path] = []
     written_by_format: dict[str, Path] = {}
@@ -45,6 +46,50 @@ def write_reports(
 
     update_report_index(report, output_dir, written_by_format, profile_name)
     return written
+
+
+def cleanup_reports(output_dir: Path, keep: int, dry_run: bool = False) -> dict:
+    if keep < 0:
+        raise ValueError("--keep must be 0 or greater")
+
+    index_path = output_dir / "index.json"
+    index_data = read_report_index(index_path)
+    sessions = index_data.get("sessions", [])
+    kept_sessions = sessions[-keep:] if keep else []
+    removed_sessions = sessions[: len(sessions) - len(kept_sessions)]
+    removed_files = sorted(collect_report_paths(output_dir, removed_sessions))
+
+    if not dry_run:
+        for path in removed_files:
+            if path.exists() and path.is_file():
+                path.unlink()
+        index_data["sessions"] = kept_sessions
+        index_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        index_path.write_text(json.dumps(index_data, indent=2) + "\n", encoding="utf-8")
+
+    return {
+        "dry_run": dry_run,
+        "kept_sessions": len(kept_sessions),
+        "removed_sessions": len(removed_sessions),
+        "removed_files": [str(path) for path in removed_files],
+    }
+
+
+def collect_report_paths(output_dir: Path, sessions: list[dict]) -> set[Path]:
+    paths: set[Path] = set()
+    for session in sessions:
+        reports = session.get("reports", {})
+        if not isinstance(reports, dict):
+            continue
+        for relative_path in reports.values():
+            if not isinstance(relative_path, str):
+                continue
+            report_path = Path(relative_path)
+            if report_path.is_absolute() or ".." in report_path.parts:
+                continue
+            paths.add(output_dir / report_path)
+    return paths
 
 
 def build_report_base_name(report: SessionReport, profile_name: str | None = None) -> str:
@@ -133,6 +178,7 @@ def build_report_index_entry(
     profile_name: str | None = None,
 ) -> dict:
     summary = report.summary
+    profile_name = profile_name if profile_name is not None else report.metadata.profile_name
     return {
         "started_at": report.session.started_at.isoformat(),
         "ended_at": report.session.ended_at.isoformat(),

@@ -3,6 +3,7 @@ import pytest
 from watch4ping.cli import (
     build_parser,
     build_start_message,
+    format_cleanup_result,
     format_compare,
     format_history,
     normalize_formats,
@@ -11,6 +12,7 @@ from watch4ping.cli import (
     parse_target,
     resolve_monitor_settings,
     resolve_report_formats,
+    validate_config,
 )
 from watch4ping.config import ProfileConfig
 from watch4ping.models import Target
@@ -56,11 +58,14 @@ def test_parser_accepts_profile_flags():
 
 
 def test_parser_accepts_history_command():
-    args = build_parser().parse_args(["history", "--output-dir", "custom-reports", "--last", "3"])
+    args = build_parser().parse_args(
+        ["history", "--output-dir", "custom-reports", "--last", "3", "--profile", "home"]
+    )
 
     assert args.command == "history"
     assert str(args.output_dir) == "custom-reports"
     assert args.last == 3
+    assert args.profile == "home"
 
 
 def test_parser_accepts_compare_command():
@@ -69,6 +74,25 @@ def test_parser_accepts_compare_command():
     assert args.command == "compare"
     assert str(args.output_dir) == "custom-reports"
     assert args.last == 2
+
+
+def test_parser_accepts_config_validate_command():
+    args = build_parser().parse_args(["config", "validate", "--config", "custom.toml"])
+
+    assert args.command == "config"
+    assert args.config_action == "validate"
+    assert str(args.config) == "custom.toml"
+
+
+def test_parser_accepts_cleanup_command():
+    args = build_parser().parse_args(
+        ["cleanup", "--output-dir", "custom-reports", "--keep", "3", "--dry-run"]
+    )
+
+    assert args.command == "cleanup"
+    assert str(args.output_dir) == "custom-reports"
+    assert args.keep == 3
+    assert args.dry_run is True
 
 
 def test_parser_leaves_last_unset_by_default():
@@ -183,6 +207,58 @@ def test_resolve_monitor_settings_prefers_cli_values_over_profile_values():
     assert config.fail_threshold == 2
 
 
+def test_validate_config_reports_missing_config(tmp_path):
+    message = validate_config(tmp_path / "missing.toml")
+
+    assert message.endswith("missing.toml not found; no profiles loaded.")
+
+
+def test_validate_config_reports_empty_config(tmp_path):
+    config_path = tmp_path / "watch4ping.toml"
+    config_path.write_text("", encoding="utf-8")
+
+    message = validate_config(config_path)
+
+    assert message.endswith("watch4ping.toml (0 profiles)")
+
+
+def test_validate_config_reports_profiles(tmp_path):
+    config_path = tmp_path / "watch4ping.toml"
+    config_path.write_text(
+        """
+[profile.home]
+targets = ["cloudflare=1.1.1.1"]
+
+[profile.office]
+targets = ["dns=google.com"]
+""",
+        encoding="utf-8",
+    )
+
+    message = validate_config(config_path)
+
+    assert message.endswith("watch4ping.toml (2 profiles: home, office)")
+
+
+def test_format_cleanup_result_prints_dry_run_summary():
+    result = format_cleanup_result(
+        {
+            "dry_run": True,
+            "kept_sessions": 2,
+            "removed_sessions": 1,
+            "removed_files": ["reports/old.json"],
+        }
+    )
+
+    assert result.splitlines() == [
+        "watch4ping cleanup",
+        "Kept sessions: 2",
+        "Would remove sessions: 1",
+        "Would remove files: 1",
+        "- reports/old.json",
+    ]
+
+
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
@@ -269,6 +345,36 @@ def test_format_history_handles_empty_index():
     assert format_history({"sessions": []}) == "No report history found."
 
 
+def test_format_history_filters_by_profile():
+    history = format_history(
+        {
+            "sessions": [
+                build_history_session("first", "office", 100.0, 0, 10.0),
+                build_history_session("second", "home", 95.0, 1, 20.0),
+                build_history_session("third", "home", 90.0, 2, 30.0),
+            ]
+        },
+        last=10,
+        profile_name="home",
+    )
+
+    lines = history.splitlines()
+
+    assert lines[0] == "watch4ping history profile=home"
+    assert "third profile=home" in lines[1]
+    assert "second profile=home" in lines[2]
+    assert "first" not in history
+
+
+def test_format_history_handles_empty_filtered_results():
+    history = format_history(
+        {"sessions": [build_history_session("first", "office", 100.0, 0, 10.0)]},
+        profile_name="home",
+    )
+
+    assert history == "No report history found for profile=home."
+
+
 def test_format_compare_prints_deltas_between_selected_sessions():
     comparison = format_compare(
         {
@@ -337,6 +443,39 @@ def test_format_compare_handles_missing_latency():
 
 def test_format_compare_requires_two_sessions():
     assert format_compare({"sessions": []}) == "Need at least 2 report sessions to compare."
+
+
+def test_format_compare_filters_by_profile():
+    comparison = format_compare(
+        {
+            "sessions": [
+                build_history_session("office", "office", 100.0, 0, 5.0),
+                build_history_session("home-one", "home", 90.0, 2, 30.0),
+                build_history_session("home-two", "home", 95.0, 1, 20.0),
+            ]
+        },
+        last=2,
+        profile_name="home",
+    )
+
+    assert "watch4ping compare profile=home" in comparison
+    assert "Previous: home-one profile=home" in comparison
+    assert "Current:  home-two profile=home" in comparison
+    assert "office" not in comparison
+
+
+def test_format_compare_requires_two_filtered_sessions():
+    comparison = format_compare(
+        {
+            "sessions": [
+                build_history_session("office-one", "office", 100.0, 0, 5.0),
+                build_history_session("home-one", "home", 90.0, 2, 30.0),
+            ]
+        },
+        profile_name="home",
+    )
+
+    assert comparison == "Need at least 2 report sessions to compare for profile=home."
 
 
 def build_history_session(

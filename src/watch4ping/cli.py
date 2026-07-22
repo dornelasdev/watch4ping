@@ -6,7 +6,7 @@ import re
 from typing import Iterable
 
 from .config import DEFAULT_CONFIG_PATH, ProfileConfig, load_config
-from .exporters import read_report_index, write_reports
+from .exporters import cleanup_reports, read_report_index, write_reports
 from .models import Target
 from .monitor import MonitorConfig, run_monitor
 from .ping import SystemPingProbe
@@ -24,9 +24,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=("monitor", "history", "compare"),
+        choices=("monitor", "history", "compare", "config", "cleanup"),
         default="monitor",
         help="Command to run. Defaults to monitor.",
+    )
+    parser.add_argument(
+        "config_action",
+        nargs="?",
+        choices=("validate",),
+        help="Config action to run. Used by config.",
     )
     parser.add_argument(
         "-t",
@@ -79,7 +85,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--profile",
-        help="Config profile to use from the selected config file.",
+        help="Config profile to use for monitoring, or profile filter for history/compare.",
     )
     parser.add_argument(
         "--list-profiles",
@@ -116,6 +122,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Number of recent entries to show or compare. Defaults to 10 for history and 2 for compare.",
     )
+    parser.add_argument(
+        "--keep",
+        type=int,
+        default=20,
+        help="Number of recent report sessions to keep for cleanup. Defaults to 20.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what cleanup would remove without deleting files or changing the index.",
+    )
     return parser
 
 
@@ -123,18 +140,38 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    if args.command != "config" and args.config_action:
+        parser.error(f"unexpected argument for {args.command}: {args.config_action}")
+
     if args.command == "history":
         try:
-            print_history(args.output_dir, args.last)
+            print_history(args.output_dir, args.last, args.profile)
         except ValueError as exc:
             parser.error(str(exc))
         return 0
 
     if args.command == "compare":
         try:
-            print_compare(args.output_dir, args.last)
+            print_compare(args.output_dir, args.last, args.profile)
         except ValueError as exc:
             parser.error(str(exc))
+        return 0
+
+    if args.command == "config":
+        if args.config_action != "validate":
+            parser.error("config command requires an action: validate")
+        try:
+            print(validate_config(args.config))
+        except ValueError as exc:
+            parser.error(str(exc))
+        return 0
+
+    if args.command == "cleanup":
+        try:
+            result = cleanup_reports(args.output_dir, args.keep, dry_run=args.dry_run)
+        except ValueError as exc:
+            parser.error(str(exc))
+        print(format_cleanup_result(result))
         return 0
 
     try:
@@ -172,14 +209,18 @@ def main(argv: list[str] | None = None) -> int:
         probe=SystemPingProbe(timeout_seconds=config.timeout_seconds),
         quiet=args.quiet,
     )
-    report = build_report(session)
+    report = build_report(
+        session,
+        profile_name=args.profile,
+        config_path=str(args.config),
+    )
 
     print()
     print(format_console_summary(report))
 
     report_formats = resolve_report_formats(args)
     if report_formats:
-        written = write_reports(report, args.output_dir, report_formats, profile_name=args.profile)
+        written = write_reports(report, args.output_dir, report_formats)
         print_written_reports(written)
         return 0
 
@@ -195,31 +236,69 @@ def print_written_reports(paths: Iterable[Path]) -> None:
         print(f"Wrote {path}")
 
 
-def print_history(output_dir: Path, last: int | None) -> None:
+def print_history(output_dir: Path, last: int | None, profile_name: str | None = None) -> None:
     last = 10 if last is None else last
     if last <= 0:
         raise ValueError("--last must be greater than 0")
 
     index_data = read_report_index(output_dir / "index.json")
-    print(format_history(index_data, last))
+    print(format_history(index_data, last, profile_name))
 
 
-def print_compare(output_dir: Path, last: int | None) -> None:
+def print_compare(output_dir: Path, last: int | None, profile_name: str | None = None) -> None:
     last = 2 if last is None else last
     if last < 2:
         raise ValueError("--last must be at least 2 for compare")
 
     index_data = read_report_index(output_dir / "index.json")
-    print(format_compare(index_data, last))
+    print(format_compare(index_data, last, profile_name))
 
 
-def format_history(index_data: dict, last: int = 10) -> str:
-    sessions = index_data.get("sessions", [])
+def validate_config(config_path: Path) -> str:
+    config = load_config(config_path)
+    return format_config_validation(config_path, config)
+
+
+def format_config_validation(config_path: Path, config) -> str:
+    if not config_path.exists():
+        return f"Config OK: {config_path} not found; no profiles loaded."
+
+    profile_names = sorted(config.profiles)
+    if not profile_names:
+        return f"Config OK: {config_path} (0 profiles)"
+
+    profile_label = "profile" if len(profile_names) == 1 else "profiles"
+    return (
+        f"Config OK: {config_path} "
+        f"({len(profile_names)} {profile_label}: {', '.join(profile_names)})"
+    )
+
+
+def format_cleanup_result(result: dict) -> str:
+    action = "Would remove" if result["dry_run"] else "Removed"
+    lines = [
+        "watch4ping cleanup",
+        f"Kept sessions: {result['kept_sessions']}",
+        f"{action} sessions: {result['removed_sessions']}",
+        f"{action} files: {len(result['removed_files'])}",
+    ]
+    lines.extend(f"- {path}" for path in result["removed_files"])
+    return "\n".join(lines)
+
+
+def format_history(
+    index_data: dict,
+    last: int = 10,
+    profile_name: str | None = None,
+) -> str:
+    sessions = filter_sessions_by_profile(index_data.get("sessions", []), profile_name)
     if not sessions:
+        if profile_name:
+            return f"No report history found for profile={profile_name}."
         return "No report history found."
 
     recent_sessions = list(reversed(sessions[-last:]))
-    lines = ["watch4ping history"]
+    lines = [format_history_title(profile_name)]
     for index, session in enumerate(recent_sessions, start=1):
         summary = session.get("summary", {})
         profile = session.get("profile") or "manual"
@@ -233,9 +312,15 @@ def format_history(index_data: dict, last: int = 10) -> str:
     return "\n".join(lines)
 
 
-def format_compare(index_data: dict, last: int = 2) -> str:
-    sessions = index_data.get("sessions", [])
+def format_compare(
+    index_data: dict,
+    last: int = 2,
+    profile_name: str | None = None,
+) -> str:
+    sessions = filter_sessions_by_profile(index_data.get("sessions", []), profile_name)
     if len(sessions) < 2:
+        if profile_name:
+            return f"Need at least 2 report sessions to compare for profile={profile_name}."
         return "Need at least 2 report sessions to compare."
 
     selected_sessions = sessions[-last:]
@@ -245,7 +330,7 @@ def format_compare(index_data: dict, last: int = 2) -> str:
     current_summary = current.get("summary", {})
 
     lines = [
-        "watch4ping compare",
+        format_compare_title(profile_name),
         f"Previous: {previous.get('started_at', 'unknown')} profile={previous.get('profile') or 'manual'}",
         f"Current:  {current.get('started_at', 'unknown')} profile={current.get('profile') or 'manual'}",
         f"Uptime: {format_percent_delta(previous_summary, current_summary, 'uptime_percent')}",
@@ -254,6 +339,24 @@ def format_compare(index_data: dict, last: int = 2) -> str:
         f"Worst target: {format_worst_target_change(previous, current)}",
     ]
     return "\n".join(lines)
+
+
+def filter_sessions_by_profile(sessions: list[dict], profile_name: str | None) -> list[dict]:
+    if profile_name is None:
+        return sessions
+    return [session for session in sessions if session.get("profile") == profile_name]
+
+
+def format_history_title(profile_name: str | None) -> str:
+    if profile_name:
+        return f"watch4ping history profile={profile_name}"
+    return "watch4ping history"
+
+
+def format_compare_title(profile_name: str | None) -> str:
+    if profile_name:
+        return f"watch4ping compare profile={profile_name}"
+    return "watch4ping compare"
 
 
 def format_percent_delta(previous: dict, current: dict, key: str) -> str:

@@ -66,6 +66,8 @@ watch4ping --profile home --duration 30s --yes
 
 Profile runs include the profile name in report filenames, such as
 `watch4ping-home-20260718-120000.html`.
+JSON, Markdown, and HTML reports also include the selected profile and config
+path as report metadata.
 
 Or skip report writing:
 
@@ -89,11 +91,19 @@ List available profiles:
 watch4ping --list-profiles
 ```
 
+Validate the selected TOML config:
+
+```bash
+watch4ping config validate
+watch4ping config validate --config custom.toml
+```
+
 Show recent report history from `reports/index.json`:
 
 ```bash
 watch4ping history
 watch4ping history --last 5
+watch4ping history --profile home
 ```
 
 Compare recent report sessions:
@@ -101,6 +111,14 @@ Compare recent report sessions:
 ```bash
 watch4ping compare
 watch4ping compare --last 2
+watch4ping compare --profile home
+```
+
+Clean up old report sessions:
+
+```bash
+watch4ping cleanup --dry-run --keep 20
+watch4ping cleanup --keep 20
 ```
 
 ## Development

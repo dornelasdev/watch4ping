@@ -185,6 +185,18 @@ class Diagnosis:
 
 
 @dataclass(frozen=True)
+class ReportMetadata:
+    profile_name: str | None = None
+    config_path: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "profile_name": self.profile_name,
+            "config_path": self.config_path,
+        }
+
+
+@dataclass(frozen=True)
 class SessionReport:
     schema_version: str
     session: MonitorSession
@@ -193,10 +205,12 @@ class SessionReport:
     latency_spikes: tuple[LatencySpike, ...]
     target_reports: tuple[TargetReport, ...]
     diagnoses: tuple[Diagnosis, ...]
+    metadata: ReportMetadata = field(default_factory=ReportMetadata)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,
+            "metadata": self.metadata.to_dict(),
             "session": self.session.to_dict(),
             "summary": self.summary.to_dict(),
             "outages": [outage.to_dict() for outage in self.outages],

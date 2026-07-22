@@ -87,7 +87,7 @@ def test_build_report_detects_thresholded_outages():
     assert report.outages[0].failed_samples == 3
 
 
-def test_build_report_includes_schema_version_and_latency_percentiles():
+def test_build_report_includes_schema_version_metadata_and_latency_percentiles():
     start = datetime(2026, 7, 1, tzinfo=timezone.utc)
     samples = (
         PingSample(1, start, True, 10.0),
@@ -106,11 +106,19 @@ def test_build_report_includes_schema_version_and_latency_percentiles():
         samples=samples,
     )
 
-    report = build_report(session)
+    report = build_report(
+        session,
+        profile_name="home",
+        config_path="watch4ping.toml",
+    )
     report_data = report.to_dict()
 
-    assert report.schema_version == "3"
-    assert report_data["schema_version"] == "3"
+    assert report.schema_version == "4"
+    assert report_data["schema_version"] == "4"
+    assert report_data["metadata"] == {
+        "profile_name": "home",
+        "config_path": "watch4ping.toml",
+    }
     assert report.summary.p50_latency_ms == 30
     assert report.summary.p95_latency_ms == pytest.approx(168)
     assert report.summary.p99_latency_ms == pytest.approx(193.6)
@@ -301,8 +309,12 @@ def test_markdown_report_includes_diagnosis_and_target_summary():
         samples=samples,
     )
 
-    markdown = format_markdown_report(build_report(session))
+    markdown = format_markdown_report(
+        build_report(session, profile_name="home", config_path="watch4ping.toml")
+    )
 
+    assert "- Profile: `home`" in markdown
+    assert "- Config: `watch4ping.toml`" in markdown
     assert "## Diagnosis" in markdown
     assert "## Targets" in markdown
     assert "`router=192.168.1.1`" in markdown
@@ -325,10 +337,14 @@ def test_format_html_report_includes_summary_chart_and_samples():
         samples=samples,
     )
 
-    html = format_html_report(build_report(session))
+    html = format_html_report(
+        build_report(session, profile_name="home", config_path="watch4ping.toml")
+    )
 
     assert "<!doctype html>" in html
     assert "watch4ping report" in html
+    assert "Profile home" in html
+    assert "Config watch4ping.toml" in html
     assert "example.test" in html
     assert "Latency" in html
     assert "<svg" in html
