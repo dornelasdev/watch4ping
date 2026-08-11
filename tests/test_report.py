@@ -5,6 +5,7 @@ import pytest
 from watch4ping.models import MonitorSession, PingSample, Target
 from watch4ping.report import (
     build_report,
+    format_console_summary,
     format_duration,
     format_html_report,
     format_markdown_report,
@@ -113,12 +114,17 @@ def test_build_report_includes_schema_version_metadata_and_latency_percentiles()
     )
     report_data = report.to_dict()
 
-    assert report.schema_version == "4"
-    assert report_data["schema_version"] == "4"
+    assert report.schema_version == "5"
+    assert report_data["schema_version"] == "5"
     assert report_data["metadata"] == {
         "profile_name": "home",
         "config_path": "watch4ping.toml",
     }
+    assert report_data["alert_thresholds"] == {
+        "packet_loss_percent": None,
+        "avg_latency_ms": None,
+    }
+    assert report_data["alerts"] == []
     assert report.summary.p50_latency_ms == 30
     assert report.summary.p95_latency_ms == pytest.approx(168)
     assert report.summary.p99_latency_ms == pytest.approx(193.6)
@@ -149,6 +155,98 @@ def test_build_report_detects_latency_spikes():
     assert report.summary.latency_spike_threshold_ms == pytest.approx(168)
     assert report.latency_spikes[0].sequence == 5
     assert report.latency_spikes[0].latency_ms == 200
+
+
+def test_build_report_creates_per_target_loss_and_latency_alerts():
+    start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    samples = (
+        PingSample(
+            1,
+            start,
+            True,
+            10.0,
+            target_label="cloudflare",
+            target_host="1.1.1.1",
+        ),
+        PingSample(
+            2,
+            start + timedelta(seconds=2),
+            False,
+            error="timeout",
+            target_label="cloudflare",
+            target_host="1.1.1.1",
+        ),
+        PingSample(
+            1,
+            start,
+            True,
+            180.0,
+            target_label="dns",
+            target_host="google.com",
+        ),
+        PingSample(
+            2,
+            start + timedelta(seconds=2),
+            True,
+            220.0,
+            target_label="dns",
+            target_host="google.com",
+        ),
+    )
+    session = MonitorSession(
+        targets=(
+            Target(label="cloudflare", host="1.1.1.1"),
+            Target(label="dns", host="google.com"),
+        ),
+        interval_seconds=2,
+        timeout_seconds=1,
+        fail_threshold=2,
+        started_at=start,
+        ended_at=start + timedelta(seconds=4),
+        samples=samples,
+    )
+
+    report = build_report(
+        session,
+        alert_loss_percent=25,
+        alert_latency_ms=150,
+    )
+    report_data = report.to_dict()
+
+    assert [alert.code for alert in report.alerts] == ["packet_loss", "high_latency"]
+    assert report.alerts[0].target.label == "cloudflare"
+    assert report.alerts[0].observed_value == 50
+    assert report.alerts[1].target.label == "dns"
+    assert report.alerts[1].observed_value == 200
+    assert report_data["alert_thresholds"] == {
+        "packet_loss_percent": 25,
+        "avg_latency_ms": 150,
+    }
+    assert report_data["alerts"][0]["unit"] == "percent"
+    console = format_console_summary(report)
+    assert "Alerts: 2" in console
+    assert "cloudflare=1.1.1.1 packet loss was 50.00%" in console
+
+
+def test_build_report_does_not_alert_below_thresholds():
+    start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    session = MonitorSession(
+        targets=(Target(label="cloudflare", host="1.1.1.1"),),
+        interval_seconds=2,
+        timeout_seconds=1,
+        fail_threshold=2,
+        started_at=start,
+        ended_at=start + timedelta(seconds=2),
+        samples=(PingSample(1, start, True, 20.0),),
+    )
+
+    report = build_report(
+        session,
+        alert_loss_percent=5,
+        alert_latency_ms=100,
+    )
+
+    assert report.alerts == ()
 
 
 def test_build_report_includes_per_target_summaries_and_diagnosis():
@@ -310,12 +408,21 @@ def test_markdown_report_includes_diagnosis_and_target_summary():
     )
 
     markdown = format_markdown_report(
-        build_report(session, profile_name="home", config_path="watch4ping.toml")
+        build_report(
+            session,
+            profile_name="home",
+            config_path="watch4ping.toml",
+            alert_loss_percent=5,
+            alert_latency_ms=1,
+        )
     )
 
     assert "- Profile: `home`" in markdown
     assert "- Config: `watch4ping.toml`" in markdown
     assert "## Diagnosis" in markdown
+    assert "## Alerts" in markdown
+    assert "High latency" in markdown
+    assert "average latency 1.0 ms" in markdown
     assert "## Targets" in markdown
     assert "`router=192.168.1.1`" in markdown
 
@@ -338,7 +445,13 @@ def test_format_html_report_includes_summary_chart_and_samples():
     )
 
     html = format_html_report(
-        build_report(session, profile_name="home", config_path="watch4ping.toml")
+        build_report(
+            session,
+            profile_name="home",
+            config_path="watch4ping.toml",
+            alert_loss_percent=20,
+            alert_latency_ms=12,
+        )
     )
 
     assert "<!doctype html>" in html
@@ -347,6 +460,9 @@ def test_format_html_report_includes_summary_chart_and_samples():
     assert "Config watch4ping.toml" in html
     assert "example.test" in html
     assert "Latency" in html
+    assert "Alerts" in html
+    assert "Packet loss" in html
+    assert "High latency" in html
     assert "<svg" in html
     assert "timeout" in html
 

@@ -197,6 +197,38 @@ class ReportMetadata:
 
 
 @dataclass(frozen=True)
+class AlertThresholds:
+    packet_loss_percent: float | None = None
+    avg_latency_ms: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "packet_loss_percent": self.packet_loss_percent,
+            "avg_latency_ms": self.avg_latency_ms,
+        }
+
+
+@dataclass(frozen=True)
+class ReportAlert:
+    code: str
+    target: Target
+    observed_value: float
+    threshold_value: float
+    unit: str
+    message: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "code": self.code,
+            "target": self.target.to_dict(),
+            "observed_value": self.observed_value,
+            "threshold_value": self.threshold_value,
+            "unit": self.unit,
+            "message": self.message,
+        }
+
+
+@dataclass(frozen=True)
 class SessionReport:
     schema_version: str
     session: MonitorSession
@@ -206,11 +238,15 @@ class SessionReport:
     target_reports: tuple[TargetReport, ...]
     diagnoses: tuple[Diagnosis, ...]
     metadata: ReportMetadata = field(default_factory=ReportMetadata)
+    alert_thresholds: AlertThresholds = field(default_factory=AlertThresholds)
+    alerts: tuple[ReportAlert, ...] = field(default_factory=tuple)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,
             "metadata": self.metadata.to_dict(),
+            "alert_thresholds": self.alert_thresholds.to_dict(),
+            "alerts": [alert.to_dict() for alert in self.alerts],
             "session": self.session.to_dict(),
             "summary": self.summary.to_dict(),
             "outages": [outage.to_dict() for outage in self.outages],

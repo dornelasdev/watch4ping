@@ -11,7 +11,7 @@ from .models import SessionReport, TargetReport
 from .report import format_html_report, format_markdown_report
 
 
-REPORT_INDEX_SCHEMA_VERSION = "1"
+REPORT_INDEX_SCHEMA_VERSION = "2"
 
 
 def write_reports(
@@ -166,8 +166,14 @@ def read_report_index(index_path: Path) -> dict:
     index_data = json.loads(index_path.read_text(encoding="utf-8"))
     if not isinstance(index_data, dict) or not isinstance(index_data.get("sessions"), list):
         raise ValueError(f"Invalid report index: {index_path}")
-    index_data.setdefault("schema_version", REPORT_INDEX_SCHEMA_VERSION)
+    index_data["schema_version"] = REPORT_INDEX_SCHEMA_VERSION
     index_data.setdefault("updated_at", None)
+    for session in index_data["sessions"]:
+        if not isinstance(session, dict):
+            continue
+        summary = session.get("summary")
+        if isinstance(summary, dict):
+            summary.setdefault("alert_count", 0)
     return index_data
 
 
@@ -192,6 +198,7 @@ def build_report_index_entry(
             "avg_latency_ms": summary.avg_latency_ms,
             "outage_count": summary.outage_count,
             "latency_spike_count": summary.latency_spike_count,
+            "alert_count": len(report.alerts),
         },
         "worst_target": format_worst_target(find_worst_target_report(report)),
         "reports": {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,8 @@ class ProfileConfig:
     interval_seconds: float | None = None
     timeout_seconds: float | None = None
     fail_threshold: int | None = None
+    alert_loss_percent: float | None = None
+    alert_latency_ms: float | None = None
 
 
 @dataclass(frozen=True)
@@ -58,6 +61,8 @@ def parse_profile_config(name: str, data: Any) -> ProfileConfig:
     interval = data.get("interval")
     timeout = data.get("timeout")
     fail_threshold = data.get("fail_threshold")
+    alert_loss = data.get("alert_loss")
+    alert_latency = data.get("alert_latency")
 
     return ProfileConfig(
         name=name,
@@ -70,6 +75,12 @@ def parse_profile_config(name: str, data: Any) -> ProfileConfig:
         else None,
         fail_threshold=parse_positive_int(name, "fail_threshold", fail_threshold)
         if fail_threshold is not None
+        else None,
+        alert_loss_percent=parse_alert_loss(name, alert_loss)
+        if alert_loss is not None
+        else None,
+        alert_latency_ms=parse_positive_number(name, "alert_latency", alert_latency)
+        if alert_latency is not None
         else None,
     )
 
@@ -102,13 +113,24 @@ def parse_target_config(value: str) -> Target:
 
 
 def parse_positive_number(profile_name: str, key: str, value: Any) -> float:
-    if not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0:
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not isfinite(value)
+        or value <= 0
+    ):
         raise ValueError(f"profile {profile_name!r} {key} must be greater than 0")
     return float(value)
+
+
+def parse_alert_loss(profile_name: str, value: Any) -> float:
+    threshold = parse_positive_number(profile_name, "alert_loss", value)
+    if threshold > 100:
+        raise ValueError(f"profile {profile_name!r} alert_loss must be at most 100")
+    return threshold
 
 
 def parse_positive_int(profile_name: str, key: str, value: Any) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise ValueError(f"profile {profile_name!r} {key} must be a positive integer")
     return value
-

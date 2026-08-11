@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from math import isfinite
 from pathlib import Path
 import re
 from typing import Iterable
@@ -64,6 +65,21 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Consecutive failed samples required to count as an outage. Defaults to 3.",
+    )
+    parser.add_argument(
+        "--alert-loss",
+        type=parse_alert_loss_percent,
+        help="Alert when a target's packet loss reaches this percentage.",
+    )
+    parser.add_argument(
+        "--alert-latency",
+        type=parse_alert_latency_ms,
+        help="Alert when a target's average latency reaches this value in milliseconds.",
+    )
+    parser.add_argument(
+        "--fail-on-alert",
+        action="store_true",
+        help="Return exit code 1 when at least one alert threshold is reached.",
     )
     parser.add_argument(
         "-d",
@@ -194,12 +210,21 @@ def main(argv: list[str] | None = None) -> int:
     except argparse.ArgumentTypeError as exc:
         parser.error(str(exc))
 
+    if (
+        args.fail_on_alert
+        and settings.alert_loss_percent is None
+        and settings.alert_latency_ms is None
+    ):
+        parser.error("--fail-on-alert requires --alert-loss or --alert-latency")
+
     config = MonitorConfig(
         targets=settings.targets,
         interval_seconds=settings.interval_seconds,
         timeout_seconds=settings.timeout_seconds,
         fail_threshold=settings.fail_threshold,
         duration_seconds=args.duration,
+        alert_loss_percent=settings.alert_loss_percent,
+        alert_latency_ms=settings.alert_latency_ms,
     )
 
     print(build_start_message(config))
@@ -213,21 +238,24 @@ def main(argv: list[str] | None = None) -> int:
         session,
         profile_name=args.profile,
         config_path=str(args.config),
+        alert_loss_percent=config.alert_loss_percent,
+        alert_latency_ms=config.alert_latency_ms,
     )
 
     print()
     print(format_console_summary(report))
+    exit_code = 1 if args.fail_on_alert and report.alerts else 0
 
     report_formats = resolve_report_formats(args)
     if report_formats:
         written = write_reports(report, args.output_dir, report_formats)
         print_written_reports(written)
-        return 0
+        return exit_code
 
     print()
     print("No report written.")
 
-    return 0
+    return exit_code
 
 
 def print_written_reports(paths: Iterable[Path]) -> None:
@@ -307,7 +335,8 @@ def format_history(
         lines.append(
             f"{index}. {session.get('started_at', 'unknown')} "
             f"profile={profile} uptime={summary.get('uptime_percent', 0):.2f}% "
-            f"failed={summary.get('failed_samples', 0)} targets={targets} reports={reports}"
+            f"failed={summary.get('failed_samples', 0)} "
+            f"alerts={summary.get('alert_count', 0)} targets={targets} reports={reports}"
         )
     return "\n".join(lines)
 
@@ -335,6 +364,7 @@ def format_compare(
         f"Current:  {current.get('started_at', 'unknown')} profile={current.get('profile') or 'manual'}",
         f"Uptime: {format_percent_delta(previous_summary, current_summary, 'uptime_percent')}",
         f"Failed samples: {format_number_delta(previous_summary, current_summary, 'failed_samples')}",
+        f"Alerts: {format_number_delta(previous_summary, current_summary, 'alert_count')}",
         f"Avg latency: {format_latency_delta(previous_summary, current_summary)}",
         f"Worst target: {format_worst_target_change(previous, current)}",
     ]
@@ -506,6 +536,14 @@ def resolve_monitor_settings(args, profile: ProfileConfig | None) -> MonitorConf
     if fail_threshold is None:
         fail_threshold = 3
 
+    alert_loss_percent = args.alert_loss
+    if alert_loss_percent is None:
+        alert_loss_percent = profile.alert_loss_percent if profile else None
+
+    alert_latency_ms = args.alert_latency
+    if alert_latency_ms is None:
+        alert_latency_ms = profile.alert_latency_ms if profile else None
+
     if interval_seconds <= 0:
         raise argparse.ArgumentTypeError("--interval must be greater than 0")
     if timeout_seconds <= 0:
@@ -519,6 +557,8 @@ def resolve_monitor_settings(args, profile: ProfileConfig | None) -> MonitorConf
         timeout_seconds=timeout_seconds,
         fail_threshold=fail_threshold,
         duration_seconds=args.duration,
+        alert_loss_percent=alert_loss_percent,
+        alert_latency_ms=alert_latency_ms,
     )
 
 
@@ -558,6 +598,26 @@ def parse_duration_seconds(value: str) -> float:
     unit = match.group("unit") or "s"
     multipliers = {"s": 1, "m": 60, "h": 3600}
     return amount * multipliers[unit]
+
+
+def parse_alert_loss_percent(value: str) -> float:
+    try:
+        threshold = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("--alert-loss must be a number") from exc
+    if not isfinite(threshold) or threshold <= 0 or threshold > 100:
+        raise argparse.ArgumentTypeError("--alert-loss must be greater than 0 and at most 100")
+    return threshold
+
+
+def parse_alert_latency_ms(value: str) -> float:
+    try:
+        threshold = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("--alert-latency must be a number") from exc
+    if not isfinite(threshold) or threshold <= 0:
+        raise argparse.ArgumentTypeError("--alert-latency must be greater than 0")
+    return threshold
 
 
 def build_start_message(config: MonitorConfig) -> str:

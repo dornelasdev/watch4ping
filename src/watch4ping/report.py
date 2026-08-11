@@ -5,11 +5,13 @@ from ipaddress import ip_address
 from statistics import fmean, pstdev
 
 from .models import (
+    AlertThresholds,
     Diagnosis,
     LatencySpike,
     MonitorSession,
     Outage,
     PingSample,
+    ReportAlert,
     ReportMetadata,
     ReportSummary,
     SessionReport,
@@ -18,13 +20,15 @@ from .models import (
 )
 
 
-REPORT_SCHEMA_VERSION = "4"
+REPORT_SCHEMA_VERSION = "5"
 
 
 def build_report(
     session: MonitorSession,
     profile_name: str | None = None,
     config_path: str | None = None,
+    alert_loss_percent: float | None = None,
+    alert_latency_ms: float | None = None,
 ) -> SessionReport:
     target_reports = build_target_reports(session)
     outages = detect_outages(session.samples, session.fail_threshold, session.interval_seconds)
@@ -50,7 +54,72 @@ def build_report(
         target_reports=tuple(target_reports),
         diagnoses=tuple(diagnose_session(session, target_reports)),
         metadata=ReportMetadata(profile_name=profile_name, config_path=config_path),
+        alert_thresholds=AlertThresholds(
+            packet_loss_percent=alert_loss_percent,
+            avg_latency_ms=alert_latency_ms,
+        ),
+        alerts=tuple(
+            build_alerts(
+                target_reports,
+                loss_percent_threshold=alert_loss_percent,
+                latency_ms_threshold=alert_latency_ms,
+            )
+        ),
     )
+
+
+def build_alerts(
+    target_reports: list[TargetReport],
+    loss_percent_threshold: float | None,
+    latency_ms_threshold: float | None,
+) -> list[ReportAlert]:
+    alerts: list[ReportAlert] = []
+
+    for target_report in target_reports:
+        target = target_report.target
+        summary = target_report.summary
+        loss_percent = 100.0 - summary.uptime_percent
+
+        if (
+            loss_percent_threshold is not None
+            and summary.failed_samples > 0
+            and loss_percent >= loss_percent_threshold
+        ):
+            alerts.append(
+                ReportAlert(
+                    code="packet_loss",
+                    target=target,
+                    observed_value=loss_percent,
+                    threshold_value=loss_percent_threshold,
+                    unit="percent",
+                    message=(
+                        f"{format_target(target)} packet loss was {loss_percent:.2f}%, "
+                        f"meeting the {loss_percent_threshold:.2f}% alert threshold."
+                    ),
+                )
+            )
+
+        if (
+            latency_ms_threshold is not None
+            and summary.avg_latency_ms is not None
+            and summary.avg_latency_ms >= latency_ms_threshold
+        ):
+            alerts.append(
+                ReportAlert(
+                    code="high_latency",
+                    target=target,
+                    observed_value=summary.avg_latency_ms,
+                    threshold_value=latency_ms_threshold,
+                    unit="ms",
+                    message=(
+                        f"{format_target(target)} average latency was "
+                        f"{summary.avg_latency_ms:.1f} ms, meeting the "
+                        f"{latency_ms_threshold:.1f} ms alert threshold."
+                    ),
+                )
+            )
+
+    return alerts
 
 
 def build_target_reports(session: MonitorSession) -> list[TargetReport]:
@@ -385,8 +454,12 @@ def format_console_summary(report: SessionReport) -> str:
         f"Longest outage: {format_duration(summary.longest_outage_seconds)}",
         f"Latency: {format_latency_summary(summary)}",
         f"Latency spikes: {summary.latency_spike_count}",
-        f"Diagnosis: {report.diagnoses[0].message if report.diagnoses else 'n/a'}",
+        f"Alerts: {len(report.alerts)}",
     ]
+    lines.extend(f"  - {alert.message}" for alert in report.alerts)
+    lines.append(
+        f"Diagnosis: {report.diagnoses[0].message if report.diagnoses else 'n/a'}"
+    )
     return "\n".join(lines)
 
 
@@ -416,9 +489,18 @@ def format_markdown_report(report: SessionReport) -> str:
         f"- Latency: `{format_latency_summary(summary)}`",
         f"- Latency spikes: `{summary.latency_spike_count}`",
         "",
-        "## Diagnosis",
+        "## Alerts",
         "",
     ]
+
+    lines.extend(format_markdown_alerts(report))
+    lines.extend(
+        [
+            "",
+            "## Diagnosis",
+            "",
+        ]
+    )
 
     lines.extend(f"- {diagnosis.message}" for diagnosis in report.diagnoses)
     lines.extend(
@@ -591,7 +673,13 @@ def format_html_report(report: SessionReport) -> str:
       {html_metric("Outages", str(summary.outage_count))}
       {html_metric("Longest outage", format_duration(summary.longest_outage_seconds))}
       {html_metric("Latency spikes", str(summary.latency_spike_count))}
+      {html_metric("Alerts", str(len(report.alerts)))}
     </div>
+
+    <section>
+      <h2>Alerts</h2>
+      {format_html_alerts(report)}
+    </section>
 
     <section>
       <h2>Diagnosis</h2>
@@ -653,6 +741,31 @@ def format_report_config(report: SessionReport) -> str:
     return report.metadata.config_path or "n/a"
 
 
+def format_markdown_alerts(report: SessionReport) -> list[str]:
+    threshold_summary = format_alert_thresholds(report)
+    if threshold_summary is None:
+        return ["No alert thresholds configured."]
+
+    lines = [f"Configured thresholds: {threshold_summary}", ""]
+    if not report.alerts:
+        lines.append("No alert thresholds exceeded.")
+        return lines
+
+    lines.extend(
+        [
+            "| Target | Alert | Observed | Threshold |",
+            "| --- | --- | ---: | ---: |",
+        ]
+    )
+    for alert in report.alerts:
+        lines.append(
+            f"| `{format_target(alert.target)}` | `{format_alert_name(alert.code)}` | "
+            f"`{format_alert_value(alert.observed_value, alert.unit)}` | "
+            f"`{format_alert_value(alert.threshold_value, alert.unit)}` |"
+        )
+    return lines
+
+
 def format_markdown_target_row(target_report: TargetReport) -> str:
     summary = target_report.summary
     avg_latency = (
@@ -682,6 +795,57 @@ def format_html_diagnoses(report: SessionReport) -> str:
         for diagnosis in report.diagnoses
     )
     return f"<ul>{items}</ul>"
+
+
+def format_html_alerts(report: SessionReport) -> str:
+    threshold_summary = format_alert_thresholds(report)
+    if threshold_summary is None:
+        return '<p class="empty">No alert thresholds configured.</p>'
+
+    policy = f'<p class="subtitle">Configured thresholds: {escape(threshold_summary)}</p>'
+    if not report.alerts:
+        return policy + '<p class="empty">No alert thresholds exceeded.</p>'
+
+    rows = "\n".join(
+        "<tr>"
+        f"<td>{escape(format_target(alert.target))}</td>"
+        f"<td class=\"fail\">{escape(format_alert_name(alert.code))}</td>"
+        f"<td>{escape(format_alert_value(alert.observed_value, alert.unit))}</td>"
+        f"<td>{escape(format_alert_value(alert.threshold_value, alert.unit))}</td>"
+        "</tr>"
+        for alert in report.alerts
+    )
+    table = (
+        "<table><thead><tr><th>Target</th><th>Alert</th><th>Observed</th>"
+        f"<th>Threshold</th></tr></thead><tbody>{rows}</tbody></table>"
+    )
+    return policy + table
+
+
+def format_alert_thresholds(report: SessionReport) -> str | None:
+    thresholds = report.alert_thresholds
+    configured: list[str] = []
+    if thresholds.packet_loss_percent is not None:
+        configured.append(f"packet loss {thresholds.packet_loss_percent:.2f}%")
+    if thresholds.avg_latency_ms is not None:
+        configured.append(f"average latency {thresholds.avg_latency_ms:.1f} ms")
+    return ", ".join(configured) if configured else None
+
+
+def format_alert_name(code: str) -> str:
+    names = {
+        "packet_loss": "Packet loss",
+        "high_latency": "High latency",
+    }
+    return names.get(code, code.replace("_", " ").title())
+
+
+def format_alert_value(value: float, unit: str) -> str:
+    if unit == "percent":
+        return f"{value:.2f}%"
+    if unit == "ms":
+        return f"{value:.1f} ms"
+    return f"{value:g} {unit}"
 
 
 def format_html_target_table(report: SessionReport) -> str:

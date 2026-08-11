@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from watch4ping.cli import (
@@ -6,6 +8,7 @@ from watch4ping.cli import (
     format_cleanup_result,
     format_compare,
     format_history,
+    main,
     normalize_formats,
     normalize_targets,
     parse_duration_seconds,
@@ -15,7 +18,7 @@ from watch4ping.cli import (
     validate_config,
 )
 from watch4ping.config import ProfileConfig
-from watch4ping.models import Target
+from watch4ping.models import MonitorSession, PingSample, Target
 from watch4ping.monitor import MonitorConfig
 
 
@@ -34,6 +37,10 @@ def test_parser_accepts_short_monitoring_flags():
             "30s",
             "--format",
             "html",
+            "--alert-loss",
+            "5",
+            "--alert-latency",
+            "150",
         ]
     )
 
@@ -45,6 +52,123 @@ def test_parser_accepts_short_monitoring_flags():
     assert args.timeout == 2
     assert args.duration == 30
     assert args.formats == ["html"]
+    assert args.alert_loss == 5
+    assert args.alert_latency == 150
+
+
+def test_parser_accepts_fail_on_alert():
+    args = build_parser().parse_args(["--alert-loss", "5", "--fail-on-alert"])
+
+    assert args.fail_on_alert is True
+
+
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    [
+        ("--alert-loss", "0"),
+        ("--alert-loss", "101"),
+        ("--alert-loss", "nan"),
+        ("--alert-latency", "0"),
+        ("--alert-latency", "inf"),
+    ],
+)
+def test_parser_rejects_invalid_alert_thresholds(flag, value):
+    with pytest.raises(SystemExit):
+        build_parser().parse_args([flag, value])
+
+
+def test_main_rejects_fail_on_alert_without_threshold():
+    with pytest.raises(SystemExit):
+        main(["--fail-on-alert"])
+
+
+@pytest.mark.parametrize(("threshold", "expected_exit_code"), [("1", 1), ("100", 0)])
+def test_main_writes_report_before_returning_alert_status(
+    monkeypatch,
+    tmp_path,
+    threshold,
+    expected_exit_code,
+):
+    start = datetime(2026, 8, 11, tzinfo=timezone.utc)
+    session = MonitorSession(
+        targets=(Target(label="cloudflare", host="1.1.1.1"),),
+        interval_seconds=2,
+        timeout_seconds=1,
+        fail_threshold=3,
+        started_at=start,
+        ended_at=start + timedelta(seconds=2),
+        samples=(PingSample(1, start, True, 20.0),),
+    )
+    written_reports = []
+
+    monkeypatch.setattr("watch4ping.cli.run_monitor", lambda **_kwargs: session)
+    monkeypatch.setattr(
+        "watch4ping.cli.write_reports",
+        lambda report, *_args: written_reports.append(report) or [],
+    )
+
+    exit_code = main(
+        [
+            "--duration",
+            "1s",
+            "--alert-latency",
+            threshold,
+            "--fail-on-alert",
+            "--format",
+            "json",
+            "--output-dir",
+            str(tmp_path),
+        ]
+    )
+
+    assert exit_code == expected_exit_code
+    assert len(written_reports) == 1
+    assert bool(written_reports[0].alerts) is bool(expected_exit_code)
+
+
+def test_main_uses_profile_alert_threshold_for_exit_status(monkeypatch, tmp_path):
+    config_path = tmp_path / "watch4ping.toml"
+    config_path.write_text(
+        """
+[profile.home]
+targets = ["cloudflare=1.1.1.1"]
+alert_latency = 1
+""",
+        encoding="utf-8",
+    )
+    start = datetime(2026, 8, 11, tzinfo=timezone.utc)
+    session = MonitorSession(
+        targets=(Target(label="cloudflare", host="1.1.1.1"),),
+        interval_seconds=2,
+        timeout_seconds=1,
+        fail_threshold=3,
+        started_at=start,
+        ended_at=start + timedelta(seconds=2),
+        samples=(PingSample(1, start, True, 20.0),),
+    )
+    written_reports = []
+    monkeypatch.setattr("watch4ping.cli.run_monitor", lambda **_kwargs: session)
+    monkeypatch.setattr(
+        "watch4ping.cli.write_reports",
+        lambda report, *_args: written_reports.append(report) or [],
+    )
+
+    exit_code = main(
+        [
+            "--config",
+            str(config_path),
+            "--profile",
+            "home",
+            "--duration",
+            "1s",
+            "--fail-on-alert",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 1
+    assert written_reports[0].alert_thresholds.avg_latency_ms == 1
 
 
 def test_parser_accepts_profile_flags():
@@ -177,6 +301,8 @@ def test_resolve_monitor_settings_uses_profile_values():
         interval_seconds=5,
         timeout_seconds=2,
         fail_threshold=4,
+        alert_loss_percent=5,
+        alert_latency_ms=150,
     )
 
     config = resolve_monitor_settings(args, profile)
@@ -185,11 +311,26 @@ def test_resolve_monitor_settings_uses_profile_values():
     assert config.interval_seconds == 5
     assert config.timeout_seconds == 2
     assert config.fail_threshold == 4
+    assert config.alert_loss_percent == 5
+    assert config.alert_latency_ms == 150
 
 
 def test_resolve_monitor_settings_prefers_cli_values_over_profile_values():
     args = build_parser().parse_args(
-        ["-t", "cloudflare=1.1.1.1", "-i", "1", "-w", "1", "--fail-threshold", "2"]
+        [
+            "-t",
+            "cloudflare=1.1.1.1",
+            "-i",
+            "1",
+            "-w",
+            "1",
+            "--fail-threshold",
+            "2",
+            "--alert-loss",
+            "10",
+            "--alert-latency",
+            "100",
+        ]
     )
     profile = ProfileConfig(
         name="home",
@@ -197,6 +338,8 @@ def test_resolve_monitor_settings_prefers_cli_values_over_profile_values():
         interval_seconds=5,
         timeout_seconds=2,
         fail_threshold=4,
+        alert_loss_percent=5,
+        alert_latency_ms=150,
     )
 
     config = resolve_monitor_settings(args, profile)
@@ -205,6 +348,8 @@ def test_resolve_monitor_settings_prefers_cli_values_over_profile_values():
     assert config.interval_seconds == 1
     assert config.timeout_seconds == 1
     assert config.fail_threshold == 2
+    assert config.alert_loss_percent == 10
+    assert config.alert_latency_ms == 100
 
 
 def test_validate_config_reports_missing_config(tmp_path):
@@ -325,7 +470,11 @@ def test_format_history_prints_recent_sessions_first():
                     "started_at": "2026-07-18T12:05:00+00:00",
                     "profile": None,
                     "targets": [{"label": "dns", "host": "google.com"}],
-                    "summary": {"uptime_percent": 50.0, "failed_samples": 2},
+                    "summary": {
+                        "uptime_percent": 50.0,
+                        "failed_samples": 2,
+                        "alert_count": 2,
+                    },
                     "reports": {"json": "watch4ping-20260718-120500.json"},
                 },
             ]
@@ -337,7 +486,7 @@ def test_format_history_prints_recent_sessions_first():
 
     assert lines[0] == "watch4ping history"
     assert "2026-07-18T12:05:00+00:00 profile=manual" in lines[1]
-    assert "uptime=50.00% failed=2 targets=dns=google.com reports=json" in lines[1]
+    assert "uptime=50.00% failed=2 alerts=2 targets=dns=google.com reports=json" in lines[1]
     assert "2026-07-18T12:00:00+00:00 profile=home" in lines[2]
 
 
@@ -385,6 +534,7 @@ def test_format_compare_prints_deltas_between_selected_sessions():
                     uptime_percent=90.0,
                     failed_samples=3,
                     avg_latency_ms=20.0,
+                    alert_count=2,
                     worst_target={"label": "dns", "host": "google.com"},
                 ),
                 build_history_session(
@@ -393,6 +543,7 @@ def test_format_compare_prints_deltas_between_selected_sessions():
                     uptime_percent=100.0,
                     failed_samples=0,
                     avg_latency_ms=15.5,
+                    alert_count=0,
                     worst_target={"label": "cloudflare", "host": "1.1.1.1"},
                 ),
             ]
@@ -406,6 +557,7 @@ def test_format_compare_prints_deltas_between_selected_sessions():
         "Current:  2026-07-18T12:05:00+00:00 profile=home",
         "Uptime: 90.00% -> 100.00% (+10 pp)",
         "Failed samples: 3 -> 0 (-3)",
+        "Alerts: 2 -> 0 (-2)",
         "Avg latency: 20.0 ms -> 15.5 ms (-4.50 ms)",
         "Worst target: dns=google.com -> cloudflare=1.1.1.1",
     ]
@@ -484,6 +636,7 @@ def build_history_session(
     uptime_percent,
     failed_samples,
     avg_latency_ms,
+    alert_count=0,
     worst_target=None,
 ):
     return {
@@ -494,6 +647,7 @@ def build_history_session(
             "uptime_percent": uptime_percent,
             "failed_samples": failed_samples,
             "avg_latency_ms": avg_latency_ms,
+            "alert_count": alert_count,
         },
         "worst_target": {"target": worst_target} if worst_target else None,
         "reports": {"json": "report.json"},

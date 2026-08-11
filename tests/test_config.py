@@ -19,6 +19,8 @@ targets = ["router=192.168.1.1", "cloudflare=1.1.1.1"]
 interval = 5
 timeout = 2
 fail_threshold = 4
+alert_loss = 5
+alert_latency = 150
 """,
         encoding="utf-8",
     )
@@ -33,6 +35,8 @@ fail_threshold = 4
     assert profile.interval_seconds == 5
     assert profile.timeout_seconds == 2
     assert profile.fail_threshold == 4
+    assert profile.alert_loss_percent == 5
+    assert profile.alert_latency_ms == 150
 
 
 def test_load_config_rejects_invalid_profile_values(tmp_path):
@@ -44,6 +48,24 @@ targets = []
 """,
         encoding="utf-8",
     )
+
+    with pytest.raises(ValueError):
+        load_config(path)
+
+
+@pytest.mark.parametrize(
+    "setting",
+    [
+        "alert_loss = 0",
+        "alert_loss = 101",
+        'alert_loss = "5"',
+        "alert_latency = 0",
+        "alert_latency = nan",
+    ],
+)
+def test_load_config_rejects_invalid_alert_thresholds(tmp_path, setting):
+    path = tmp_path / "watch4ping.toml"
+    path.write_text(f"[profile.home]\n{setting}\n", encoding="utf-8")
 
     with pytest.raises(ValueError):
         load_config(path)

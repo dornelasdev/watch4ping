@@ -1,14 +1,19 @@
 import json
 from datetime import datetime, timedelta, timezone
 
-from watch4ping.exporters import cleanup_reports, slugify_profile_name, write_reports
+from watch4ping.exporters import (
+    cleanup_reports,
+    read_report_index,
+    slugify_profile_name,
+    write_reports,
+)
 from watch4ping.models import MonitorSession, PingSample, Target
 from watch4ping.report import build_report
 
 
 def test_write_reports_creates_report_index(tmp_path):
     start = datetime(2026, 7, 18, 12, 0, 0, tzinfo=timezone.utc)
-    report = build_sample_report(start)
+    report = build_sample_report(start, alert_loss_percent=50)
 
     written = write_reports(report, tmp_path, ("json", "html"))
 
@@ -20,7 +25,7 @@ def test_write_reports_creates_report_index(tmp_path):
         tmp_path / "watch4ping-20260718-120000.json",
         tmp_path / "watch4ping-20260718-120000.html",
     ]
-    assert index_data["schema_version"] == "1"
+    assert index_data["schema_version"] == "2"
     assert session_entry["started_at"] == "2026-07-18T12:00:00+00:00"
     assert session_entry["targets"] == [
         {"label": "cloudflare", "host": "1.1.1.1"},
@@ -28,6 +33,7 @@ def test_write_reports_creates_report_index(tmp_path):
     ]
     assert session_entry["summary"]["total_samples"] == 4
     assert session_entry["summary"]["failed_samples"] == 2
+    assert session_entry["summary"]["alert_count"] == 1
     assert session_entry["worst_target"]["target"] == {
         "label": "dns",
         "host": "google.com",
@@ -57,6 +63,24 @@ def test_write_reports_appends_to_existing_report_index(tmp_path):
     assert index_data["sessions"][1]["reports"] == {
         "md": "watch4ping-20260718-120500.md"
     }
+
+
+def test_read_report_index_migrates_missing_alert_counts(tmp_path):
+    index_path = tmp_path / "index.json"
+    index_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "1",
+                "sessions": [{"summary": {"failed_samples": 0}}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    index_data = read_report_index(index_path)
+
+    assert index_data["schema_version"] == "2"
+    assert index_data["sessions"][0]["summary"]["alert_count"] == 0
 
 
 def test_write_reports_includes_profile_name_in_filenames_and_index(tmp_path):
@@ -133,7 +157,11 @@ def test_cleanup_reports_rejects_negative_keep(tmp_path):
         raise AssertionError("cleanup_reports should reject negative keep")
 
 
-def build_sample_report(start: datetime, profile_name: str | None = None):
+def build_sample_report(
+    start: datetime,
+    profile_name: str | None = None,
+    alert_loss_percent: float | None = None,
+):
     samples = (
         PingSample(
             1,
@@ -180,4 +208,8 @@ def build_sample_report(start: datetime, profile_name: str | None = None):
         ended_at=start + timedelta(seconds=4),
         samples=samples,
     )
-    return build_report(session, profile_name=profile_name)
+    return build_report(
+        session,
+        profile_name=profile_name,
+        alert_loss_percent=alert_loss_percent,
+    )

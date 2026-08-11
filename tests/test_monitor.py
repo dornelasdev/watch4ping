@@ -1,12 +1,17 @@
 from datetime import datetime, timezone
 from io import StringIO
 
+import pytest
+
 from watch4ping.models import PingResult, PingSample, Target
 from watch4ping.monitor import (
+    LiveTargetStats,
+    format_live_stats,
     format_sample_line,
     print_sample_group,
     probe_targets,
     should_stop_before_next_sample,
+    update_live_stats,
 )
 
 
@@ -53,6 +58,22 @@ def test_format_sample_line_formats_successful_sample():
     assert format_sample_line(sample) == "cloudflare  OK    12.3 ms"
 
 
+def test_live_target_stats_track_success_failure_loss_and_average():
+    stats = LiveTargetStats()
+    timestamp = datetime(2026, 7, 11, tzinfo=timezone.utc)
+
+    stats.add(PingSample(1, timestamp, True, 10.0))
+    stats.add(PingSample(2, timestamp, False, error="timeout"))
+    stats.add(PingSample(3, timestamp, True, 30.0))
+
+    assert stats.total_samples == 3
+    assert stats.successful_samples == 2
+    assert stats.failed_samples == 1
+    assert stats.loss_percent == pytest.approx(100 / 3)
+    assert stats.avg_latency_ms == 20
+    assert format_live_stats(stats) == "ok 2  fail 1  loss 33.3%  avg 20.0 ms"
+
+
 def test_print_sample_group_formats_round_output():
     stream = StringIO()
     samples = [
@@ -78,9 +99,37 @@ def test_print_sample_group_formats_round_output():
 
     assert stream.getvalue() == (
         "[2] 2026-07-11 12:00:00 UTC\n"
-        "  router      OK    2.5 ms\n"
-        "  cloudflare  FAIL  timeout\n"
+        "  router      OK    2.5 ms   | ok 1  fail 0  loss 0.0%  avg 2.5 ms\n"
+        "  cloudflare  FAIL  timeout  | ok 0  fail 1  loss 100.0%  avg n/a\n"
     )
+
+
+def test_print_sample_group_uses_cumulative_live_stats():
+    stream = StringIO()
+    timestamp = datetime(2026, 7, 11, 12, 0, 0, tzinfo=timezone.utc)
+    first_sample = PingSample(
+        sequence=1,
+        timestamp=timestamp,
+        ok=True,
+        latency_ms=10.0,
+        target_label="cloudflare",
+        target_host="1.1.1.1",
+    )
+    second_sample = PingSample(
+        sequence=2,
+        timestamp=timestamp,
+        ok=False,
+        error="timeout",
+        target_label="cloudflare",
+        target_host="1.1.1.1",
+    )
+    live_stats = {}
+    update_live_stats(live_stats, [first_sample])
+    update_live_stats(live_stats, [second_sample])
+
+    print_sample_group([second_sample], live_stats=live_stats, stream=stream)
+
+    assert "ok 1  fail 1  loss 50.0%  avg 10.0 ms" in stream.getvalue()
 
 
 def test_should_stop_before_next_sample_allows_initial_sample():

@@ -4,7 +4,7 @@ import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TextIO, Protocol
+from typing import Mapping, Protocol, TextIO
 
 from .models import MonitorSession, PingResult, PingSample, Target
 
@@ -21,10 +21,46 @@ class MonitorConfig:
     timeout_seconds: float = 1.0
     fail_threshold: int = 3
     duration_seconds: float | None = None
+    alert_loss_percent: float | None = None
+    alert_latency_ms: float | None = None
 
     @property
     def target(self) -> str:
         return self.targets[0].host
+
+
+@dataclass
+class LiveTargetStats:
+    successful_samples: int = 0
+    failed_samples: int = 0
+    latency_total_ms: float = 0.0
+    latency_samples: int = 0
+
+    @property
+    def total_samples(self) -> int:
+        return self.successful_samples + self.failed_samples
+
+    @property
+    def loss_percent(self) -> float:
+        if not self.total_samples:
+            return 0.0
+        return self.failed_samples / self.total_samples * 100
+
+    @property
+    def avg_latency_ms(self) -> float | None:
+        if not self.latency_samples:
+            return None
+        return self.latency_total_ms / self.latency_samples
+
+    def add(self, sample: PingSample) -> None:
+        if sample.ok:
+            self.successful_samples += 1
+            if sample.latency_ms is not None:
+                self.latency_total_ms += sample.latency_ms
+                self.latency_samples += 1
+            return
+
+        self.failed_samples += 1
 
 
 def run_monitor(
@@ -34,6 +70,7 @@ def run_monitor(
 ) -> MonitorSession:
     started_at = datetime.now(timezone.utc)
     samples: list[PingSample] = []
+    live_stats: dict[tuple[str | None, str | None], LiveTargetStats] = {}
     sequence = 1
     started_monotonic = time.monotonic()
     next_probe_at = started_monotonic
@@ -66,7 +103,8 @@ def run_monitor(
             samples.extend(samples_for_sequence)
 
             if not quiet:
-                print_sample_group(samples_for_sequence)
+                update_live_stats(live_stats, samples_for_sequence)
+                print_sample_group(samples_for_sequence, live_stats=live_stats)
 
             sequence += 1
             next_probe_at += config.interval_seconds
@@ -123,29 +161,85 @@ def should_stop_before_next_sample(
     )
 
 
-def print_sample_group(samples: list[PingSample], stream: TextIO = sys.stderr) -> None:
+def update_live_stats(
+    live_stats: dict[tuple[str | None, str | None], LiveTargetStats],
+    samples: list[PingSample],
+) -> None:
+    for sample in samples:
+        stats = live_stats.setdefault(sample_target_key(sample), LiveTargetStats())
+        stats.add(sample)
+
+
+def print_sample_group(
+    samples: list[PingSample],
+    stream: TextIO = sys.stderr,
+    live_stats: Mapping[tuple[str | None, str | None], LiveTargetStats] | None = None,
+) -> None:
     if not samples:
         return
+
+    if live_stats is None:
+        current_stats: dict[tuple[str | None, str | None], LiveTargetStats] = {}
+        update_live_stats(current_stats, samples)
+        live_stats = current_stats
 
     sequence = samples[0].sequence
     timestamp = samples[0].formatted_timestamp
     print(f"[{sequence}] {timestamp}", file=stream)
 
     target_width = max(len(format_sample_target(sample)) for sample in samples)
+    result_width = max(len(format_sample_result(sample)) for sample in samples)
     for sample in samples:
-        print(f"  {format_sample_line(sample, target_width)}", file=stream)
+        line = format_sample_line(
+            sample,
+            target_width,
+            result_width,
+            live_stats.get(sample_target_key(sample)),
+        )
+        print(f"  {line}", file=stream)
 
 
-def format_sample_line(sample: PingSample, target_width: int | None = None) -> str:
+def format_sample_line(
+    sample: PingSample,
+    target_width: int | None = None,
+    result_width: int | None = None,
+    stats: LiveTargetStats | None = None,
+) -> str:
     target = format_sample_target(sample)
     if target_width is not None:
         target = target.ljust(target_width)
 
-    if sample.ok:
-        latency = f"{sample.latency_ms:.1f} ms" if sample.latency_ms is not None else "ok"
-        return f"{target}  OK    {latency}"
+    status = "OK  " if sample.ok else "FAIL"
+    result = format_sample_result(sample)
+    if result_width is not None:
+        result = result.ljust(result_width)
 
-    return f"{target}  FAIL  {sample.error or 'no response'}"
+    line = f"{target}  {status}  {result}"
+    if stats is not None:
+        line += f"  | {format_live_stats(stats)}"
+    return line
+
+
+def format_sample_result(sample: PingSample) -> str:
+    if sample.ok:
+        return f"{sample.latency_ms:.1f} ms" if sample.latency_ms is not None else "ok"
+    return sample.error or "no response"
+
+
+def format_live_stats(stats: LiveTargetStats) -> str:
+    avg_latency = (
+        f"{stats.avg_latency_ms:.1f} ms"
+        if stats.avg_latency_ms is not None
+        else "n/a"
+    )
+    return (
+        f"ok {stats.successful_samples}  fail {stats.failed_samples}  "
+        f"loss {stats.loss_percent:.1f}%  avg {avg_latency}"
+    )
+
+
+def sample_target_key(sample: PingSample) -> tuple[str | None, str | None]:
+    return sample.target_label, sample.target_host
 
 
 def format_sample_target(sample: PingSample) -> str:
