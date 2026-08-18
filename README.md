@@ -156,6 +156,34 @@ watch4ping compare --profile home
 Comparisons include the alert-count change alongside uptime, failures, latency,
 and the worst target.
 
+Start the local report dashboard:
+
+```bash
+watch4ping dashboard
+```
+
+Open it automatically in the default browser:
+
+```bash
+watch4ping dashboard --open
+```
+
+Then open `http://127.0.0.1:8765` in a browser. The dashboard reads the selected
+output directory's `index.json`, displays report sessions newest first, and is
+only available from the local machine. In supported terminals, `Cmd`+click the
+printed URL to open it. Use `--port` or `--output-dir` when needed:
+
+```bash
+watch4ping dashboard --port 9000 --output-dir custom-reports
+```
+
+Sessions with an HTML export include a `View report` link. JSON-only sessions
+remain visible in the dashboard but do not have a browser report to open.
+
+Use the profile menu to narrow the session table. Select exactly two sessions
+and choose `Compare selected` to view uptime, failure, alert, and average-latency
+changes directly in the dashboard.
+
 Clean up old report sessions:
 
 ```bash

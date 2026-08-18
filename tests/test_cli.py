@@ -219,6 +219,40 @@ def test_parser_accepts_cleanup_command():
     assert args.dry_run is True
 
 
+def test_parser_accepts_dashboard_command():
+    args = build_parser().parse_args(
+        ["dashboard", "--output-dir", "custom-reports", "--port", "9000", "--open"]
+    )
+
+    assert args.command == "dashboard"
+    assert str(args.output_dir) == "custom-reports"
+    assert args.port == 9000
+    assert args.open is True
+
+
+@pytest.mark.parametrize("port", ["0", "65536", "abc"])
+def test_parser_rejects_invalid_dashboard_port(port):
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["dashboard", "--port", port])
+
+
+def test_main_starts_dashboard_without_loading_monitor_config(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(
+        "watch4ping.cli.serve_dashboard",
+        lambda output_dir, port, open_browser=False: calls.append(
+            (output_dir, port, open_browser)
+        ),
+    )
+
+    exit_code = main(
+        ["dashboard", "--output-dir", str(tmp_path), "--port", "9000", "--open"]
+    )
+
+    assert exit_code == 0
+    assert calls == [(tmp_path, 9000, True)]
+
+
 def test_parser_leaves_last_unset_by_default():
     args = build_parser().parse_args(["compare"])
 

@@ -18,4 +18,4 @@ fail_threshold = 3
 
 # Optional report alert thresholds:
 # alert_loss = 5       # packet-loss percentage
-alert_latency = 0.5  # average latency in milliseconds
+# alert_latency = 0.5  # average latency in milliseconds

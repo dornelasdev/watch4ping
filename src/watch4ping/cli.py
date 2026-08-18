@@ -7,6 +7,7 @@ import re
 from typing import Iterable
 
 from .config import DEFAULT_CONFIG_PATH, ProfileConfig, load_config
+from .dashboard import DEFAULT_DASHBOARD_PORT, serve_dashboard
 from .exporters import cleanup_reports, read_report_index, write_reports
 from .models import Target
 from .monitor import MonitorConfig, run_monitor
@@ -25,7 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=("monitor", "history", "compare", "config", "cleanup"),
+        choices=("monitor", "history", "compare", "config", "cleanup", "dashboard"),
         default="monitor",
         help="Command to run. Defaults to monitor.",
     )
@@ -149,6 +150,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Show what cleanup would remove without deleting files or changing the index.",
     )
+    parser.add_argument(
+        "--port",
+        type=parse_port,
+        default=DEFAULT_DASHBOARD_PORT,
+        help=f"Local dashboard port. Defaults to {DEFAULT_DASHBOARD_PORT}.",
+    )
+    parser.add_argument(
+        "--open",
+        action="store_true",
+        help="Open the local dashboard in the default browser after startup.",
+    )
     return parser
 
 
@@ -188,6 +200,17 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as exc:
             parser.error(str(exc))
         print(format_cleanup_result(result))
+        return 0
+
+    if args.command == "dashboard":
+        try:
+            serve_dashboard(
+                args.output_dir,
+                args.port,
+                open_browser=args.open,
+            )
+        except OSError as exc:
+            parser.error(f"could not start dashboard: {exc}")
         return 0
 
     try:
@@ -618,6 +641,16 @@ def parse_alert_latency_ms(value: str) -> float:
     if not isfinite(threshold) or threshold <= 0:
         raise argparse.ArgumentTypeError("--alert-latency must be greater than 0")
     return threshold
+
+
+def parse_port(value: str) -> int:
+    try:
+        port = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("--port must be an integer") from exc
+    if port < 1 or port > 65535:
+        raise argparse.ArgumentTypeError("--port must be between 1 and 65535")
+    return port
 
 
 def build_start_message(config: MonitorConfig) -> str:
