@@ -53,6 +53,16 @@ targets = []
         load_config(path)
 
 
+def test_load_config_identifies_malformed_toml_file(tmp_path):
+    path = tmp_path / "watch4ping.toml"
+    path.write_text("[profile.home\n", encoding="utf-8")
+
+    with pytest.raises(ValueError) as exc_info:
+        load_config(path)
+
+    assert str(exc_info.value).startswith(f"Invalid TOML in {path}:")
+
+
 @pytest.mark.parametrize(
     "setting",
     [

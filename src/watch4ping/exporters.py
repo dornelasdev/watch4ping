@@ -163,17 +163,51 @@ def read_report_index(index_path: Path) -> dict:
             "sessions": [],
         }
 
-    index_data = json.loads(index_path.read_text(encoding="utf-8"))
+    try:
+        raw_index = index_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(
+            f"Invalid report index {index_path}: file must be UTF-8 encoded"
+        ) from exc
+
+    try:
+        index_data = json.loads(raw_index)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Invalid report index {index_path}: malformed JSON at "
+            f"line {exc.lineno}, column {exc.colno}"
+        ) from exc
+
     if not isinstance(index_data, dict) or not isinstance(index_data.get("sessions"), list):
-        raise ValueError(f"Invalid report index: {index_path}")
+        raise ValueError(
+            f"Invalid report index {index_path}: expected an object with a sessions list"
+        )
+
+    schema_version = index_data.get("schema_version")
+    if schema_version not in (None, "1", REPORT_INDEX_SCHEMA_VERSION):
+        raise ValueError(
+            f"Invalid report index {index_path}: unsupported schema version "
+            f"{schema_version!r}"
+        )
+
     index_data["schema_version"] = REPORT_INDEX_SCHEMA_VERSION
     index_data.setdefault("updated_at", None)
-    for session in index_data["sessions"]:
+    for position, session in enumerate(index_data["sessions"], start=1):
         if not isinstance(session, dict):
-            continue
-        summary = session.get("summary")
-        if isinstance(summary, dict):
-            summary.setdefault("alert_count", 0)
+            raise ValueError(
+                f"Invalid report index {index_path}: session {position} must be an object"
+            )
+        summary = session.setdefault("summary", {})
+        if not isinstance(summary, dict):
+            raise ValueError(
+                f"Invalid report index {index_path}: session {position} summary must be an object"
+            )
+        summary.setdefault("alert_count", 0)
+        reports = session.get("reports")
+        if reports is not None and not isinstance(reports, dict):
+            raise ValueError(
+                f"Invalid report index {index_path}: session {position} reports must be an object"
+            )
     return index_data
 
 

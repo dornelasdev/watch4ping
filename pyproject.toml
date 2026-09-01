@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "watch4ping"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Monitor an internet connection with ping and generate session reports."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -14,7 +14,7 @@ authors = [
 ]
 keywords = ["internet", "monitoring", "ping", "network", "cli"]
 classifiers = [
-  "Development Status :: 2 - Pre-Alpha",
+  "Development Status :: 4 - Beta",
   "Environment :: Console",
   "Intended Audience :: End Users/Desktop",
   "License :: OSI Approved :: MIT License",
@@ -22,6 +22,8 @@ classifiers = [
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Topic :: Internet",
   "Topic :: System :: Monitoring",
 ]
@@ -31,14 +33,31 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "build>=1.2",
   "pytest>=8.0",
+  "twine>=6.0",
 ]
 
 [project.scripts]
 watch4ping = "watch4ping.cli:main"
 
+[tool.hatch.version]
+path = "src/watch4ping/_version.py"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/watch4ping"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src",
+  "/tests",
+  "/docs",
+  "/CHANGELOG.md",
+  "/LICENSE",
+  "/README.md",
+  "/pyproject.toml",
+  "/watch4ping.toml",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

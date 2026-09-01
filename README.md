@@ -6,17 +6,24 @@ session report.
 
 ## Status
 
-Early project scaffold. The first storage format is file-based:
+The current development version is `0.9.0`. watch4ping is approaching its first
+stable release and currently provides:
 
-- JSON: full report and raw samples
-- CSV: raw samples for spreadsheets and analysis
-- Markdown: human-readable summary
-- HTML: self-contained visual report
-- `reports/index.json`: compact history of generated report sessions
+- Continuous or duration-limited monitoring of one or more labeled targets
+- Live packet-loss and average-latency statistics
+- Outage, latency percentile, jitter, spike, diagnosis, and alert analysis
+- JSON, CSV, Markdown, and self-contained HTML reports
+- File-based report history, comparison, retention cleanup, and a local dashboard
+- TOML profiles and stable exit codes for scripts and CI jobs
 
-SQLite is intentionally left for a future history/dashboard mode.
+Report storage remains file-based by design: individual reports are portable,
+while `reports/index.json` provides the compact session history used by CLI and
+dashboard views.
 
 ## Quick Start
+
+watch4ping requires Python 3.10 or newer and the operating system's `ping`
+utility.
 
 ```bash
 python -m venv .venv
@@ -24,6 +31,8 @@ source .venv/bin/activate
 python -m pip install -e ".[dev]"
 watch4ping -t 1.1.1.1 -i 2 -w 1
 ```
+
+Check the installed version with `watch4ping --version`.
 
 Targets may be labeled and repeated:
 
@@ -72,6 +81,15 @@ triggered:
 watch4ping --profile home --duration 5m --alert-loss 5 --alert-latency 150 \
   --fail-on-alert --format json
 ```
+
+The CLI uses stable exit codes for automation:
+
+| Code | Meaning |
+| ---: | --- |
+| `0` | Command completed successfully |
+| `1` | A configured alert threshold was reached with `--fail-on-alert` |
+| `2` | Invalid command arguments or configuration |
+| `3` | Runtime failure, such as an unavailable port or unwritable report directory |
 
 Report writing still completes before the command exits. A run without triggered
 alerts returns `0`; invalid CLI usage returns `2`.
@@ -193,6 +211,26 @@ watch4ping cleanup --keep 20
 
 ## Development
 
+Install the project and development tools in an active virtual environment:
+
+```bash
+python -m pip install -e ".[dev]"
+```
+
+Run the test suite:
+
 ```bash
 pytest
 ```
+
+Build and validate release distributions:
+
+```bash
+python -m build
+python -m twine check dist/*
+```
+
+GitHub Actions runs the tests on Python 3.10 through 3.14 and verifies a clean
+wheel installation. See the [changelog](CHANGELOG.md),
+[report schema notes](docs/report-schema.md), and
+[release checklist](docs/releasing.md) for project maintenance details.

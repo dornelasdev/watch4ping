@@ -2,7 +2,10 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from watch4ping import __version__
 from watch4ping.cli import (
+    EXIT_RUNTIME_ERROR,
+    EXIT_USAGE,
     build_parser,
     build_start_message,
     format_cleanup_result,
@@ -20,6 +23,15 @@ from watch4ping.cli import (
 from watch4ping.config import ProfileConfig
 from watch4ping.models import MonitorSession, PingSample, Target
 from watch4ping.monitor import MonitorConfig
+from watch4ping.ping import PingCommandError
+
+
+def test_parser_prints_package_version(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        build_parser().parse_args(["--version"])
+
+    assert exc_info.value.code == 0
+    assert capsys.readouterr().out == f"watch4ping {__version__}\n"
 
 
 def test_parser_accepts_short_monitoring_flags():
@@ -78,8 +90,10 @@ def test_parser_rejects_invalid_alert_thresholds(flag, value):
 
 
 def test_main_rejects_fail_on_alert_without_threshold():
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit) as exc_info:
         main(["--fail-on-alert"])
+
+    assert exc_info.value.code == EXIT_USAGE
 
 
 @pytest.mark.parametrize(("threshold", "expected_exit_code"), [("1", 1), ("100", 0)])
@@ -124,6 +138,59 @@ def test_main_writes_report_before_returning_alert_status(
     assert exit_code == expected_exit_code
     assert len(written_reports) == 1
     assert bool(written_reports[0].alerts) is bool(expected_exit_code)
+
+
+def test_main_returns_runtime_error_when_report_cannot_be_written(
+    monkeypatch, tmp_path, capsys
+):
+    start = datetime(2026, 8, 11, tzinfo=timezone.utc)
+    session = MonitorSession(
+        targets=(Target(label="cloudflare", host="1.1.1.1"),),
+        interval_seconds=2,
+        timeout_seconds=1,
+        fail_threshold=3,
+        started_at=start,
+        ended_at=start + timedelta(seconds=2),
+        samples=(PingSample(1, start, True, 20.0),),
+    )
+    monkeypatch.setattr("watch4ping.cli.run_monitor", lambda **_kwargs: session)
+
+    def fail_to_write(*_args, **_kwargs):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr("watch4ping.cli.write_reports", fail_to_write)
+
+    exit_code = main(
+        [
+            "--duration",
+            "1s",
+            "--format",
+            "json",
+            "--output-dir",
+            str(tmp_path),
+        ]
+    )
+
+    assert exit_code == EXIT_RUNTIME_ERROR
+    assert capsys.readouterr().err == (
+        "watch4ping: error: could not write reports: permission denied\n"
+    )
+
+
+def test_main_returns_runtime_error_when_ping_command_is_unavailable(
+    monkeypatch, capsys
+):
+    def unavailable(**_kwargs):
+        raise PingCommandError("system ping command is unavailable")
+
+    monkeypatch.setattr("watch4ping.cli.run_monitor", unavailable)
+
+    exit_code = main(["--duration", "1s", "--no-report"])
+
+    assert exit_code == EXIT_RUNTIME_ERROR
+    assert capsys.readouterr().err == (
+        "watch4ping: error: system ping command is unavailable\n"
+    )
 
 
 def test_main_uses_profile_alert_threshold_for_exit_status(monkeypatch, tmp_path):
@@ -251,6 +318,22 @@ def test_main_starts_dashboard_without_loading_monitor_config(monkeypatch, tmp_p
 
     assert exit_code == 0
     assert calls == [(tmp_path, 9000, True)]
+
+
+def test_main_returns_runtime_error_when_dashboard_cannot_start(
+    monkeypatch, tmp_path, capsys
+):
+    def fail_to_start(*_args, **_kwargs):
+        raise OSError("address already in use")
+
+    monkeypatch.setattr("watch4ping.cli.serve_dashboard", fail_to_start)
+
+    exit_code = main(["dashboard", "--output-dir", str(tmp_path)])
+
+    assert exit_code == EXIT_RUNTIME_ERROR
+    assert capsys.readouterr().err == (
+        "watch4ping: error: could not start dashboard: address already in use\n"
+    )
 
 
 def test_parser_leaves_last_unset_by_default():

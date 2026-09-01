@@ -10,6 +10,10 @@ from .models import PingResult
 TIME_RE = re.compile(r"time[=<]\s*(?P<latency>\d+(?:\.\d+)?)\s*ms", re.IGNORECASE)
 
 
+class PingCommandError(RuntimeError):
+    """Raised when the operating system cannot launch the ping command."""
+
+
 class SystemPingProbe:
     def __init__(self, timeout_seconds: float = 1.0) -> None:
         self.timeout_seconds = timeout_seconds
@@ -26,8 +30,12 @@ class SystemPingProbe:
             )
         except subprocess.TimeoutExpired:
             return PingResult(ok=False, error="ping command timed out")
+        except FileNotFoundError as exc:
+            raise PingCommandError(
+                "system ping command is unavailable; install or restore the ping utility"
+            ) from exc
         except OSError as exc:
-            return PingResult(ok=False, error=str(exc))
+            raise PingCommandError(f"could not execute system ping command: {exc}") from exc
 
         output = "\n".join(part for part in (completed.stdout, completed.stderr) if part)
         latency_ms = parse_latency_ms(output)
@@ -66,4 +74,3 @@ def summarize_ping_error(output: str) -> str:
     if not lines:
         return "no response"
     return lines[-1]
-

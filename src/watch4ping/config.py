@@ -39,7 +39,7 @@ def load_config(path: Path) -> Watch4PingConfig:
     try:
         with path.open("rb") as config_file:
             data = tomllib.load(config_file)
-    except tomllib.TOMLDecodeError as exc:
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
         raise ValueError(f"Invalid TOML in {path}: {exc}") from exc
 
     profiles_data = data.get("profile", {})

@@ -4,24 +4,36 @@ import argparse
 from math import isfinite
 from pathlib import Path
 import re
-from typing import Iterable
+import sys
+from typing import Iterable, TextIO
 
+from . import __version__
 from .config import DEFAULT_CONFIG_PATH, ProfileConfig, load_config
 from .dashboard import DEFAULT_DASHBOARD_PORT, serve_dashboard
 from .exporters import cleanup_reports, read_report_index, write_reports
 from .models import Target
 from .monitor import MonitorConfig, run_monitor
-from .ping import SystemPingProbe
+from .ping import PingCommandError, SystemPingProbe
 from .report import build_report, format_console_summary
 
 
 DURATION_RE = re.compile(r"^(?P<value>\d+(?:\.\d+)?)(?P<unit>s|m|h)?$")
+
+EXIT_SUCCESS = 0
+EXIT_ALERT = 1
+EXIT_USAGE = 2
+EXIT_RUNTIME_ERROR = 3
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="watch4ping",
         description="Monitor an internet connection until Ctrl-C and write a report.",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
     )
     parser.add_argument(
         "command",
@@ -172,18 +184,22 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"unexpected argument for {args.command}: {args.config_action}")
 
     if args.command == "history":
+        if args.last is not None and args.last <= 0:
+            parser.error("--last must be greater than 0")
         try:
             print_history(args.output_dir, args.last, args.profile)
-        except ValueError as exc:
-            parser.error(str(exc))
-        return 0
+        except (OSError, ValueError) as exc:
+            return runtime_error(f"could not read report history: {exc}")
+        return EXIT_SUCCESS
 
     if args.command == "compare":
+        if args.last is not None and args.last < 2:
+            parser.error("--last must be at least 2 for compare")
         try:
             print_compare(args.output_dir, args.last, args.profile)
-        except ValueError as exc:
-            parser.error(str(exc))
-        return 0
+        except (OSError, ValueError) as exc:
+            return runtime_error(f"could not compare reports: {exc}")
+        return EXIT_SUCCESS
 
     if args.command == "config":
         if args.config_action != "validate":
@@ -192,15 +208,19 @@ def main(argv: list[str] | None = None) -> int:
             print(validate_config(args.config))
         except ValueError as exc:
             parser.error(str(exc))
-        return 0
+        except OSError as exc:
+            return runtime_error(f"could not read config: {exc}")
+        return EXIT_SUCCESS
 
     if args.command == "cleanup":
+        if args.keep < 0:
+            parser.error("--keep must be 0 or greater")
         try:
             result = cleanup_reports(args.output_dir, args.keep, dry_run=args.dry_run)
-        except ValueError as exc:
-            parser.error(str(exc))
+        except (OSError, ValueError) as exc:
+            return runtime_error(f"could not clean reports: {exc}")
         print(format_cleanup_result(result))
-        return 0
+        return EXIT_SUCCESS
 
     if args.command == "dashboard":
         try:
@@ -210,17 +230,19 @@ def main(argv: list[str] | None = None) -> int:
                 open_browser=args.open,
             )
         except OSError as exc:
-            parser.error(f"could not start dashboard: {exc}")
-        return 0
+            return runtime_error(f"could not start dashboard: {exc}")
+        return EXIT_SUCCESS
 
     try:
         loaded_config = load_config(args.config)
     except ValueError as exc:
         parser.error(str(exc))
+    except OSError as exc:
+        return runtime_error(f"could not read config: {exc}")
 
     if args.list_profiles:
         print_profiles(loaded_config.profiles)
-        return 0
+        return EXIT_SUCCESS
 
     profile = None
     if args.profile:
@@ -252,11 +274,14 @@ def main(argv: list[str] | None = None) -> int:
 
     print(build_start_message(config))
 
-    session = run_monitor(
-        config=config,
-        probe=SystemPingProbe(timeout_seconds=config.timeout_seconds),
-        quiet=args.quiet,
-    )
+    try:
+        session = run_monitor(
+            config=config,
+            probe=SystemPingProbe(timeout_seconds=config.timeout_seconds),
+            quiet=args.quiet,
+        )
+    except PingCommandError as exc:
+        return runtime_error(str(exc))
     report = build_report(
         session,
         profile_name=args.profile,
@@ -267,11 +292,14 @@ def main(argv: list[str] | None = None) -> int:
 
     print()
     print(format_console_summary(report))
-    exit_code = 1 if args.fail_on_alert and report.alerts else 0
+    exit_code = EXIT_ALERT if args.fail_on_alert and report.alerts else EXIT_SUCCESS
 
     report_formats = resolve_report_formats(args)
     if report_formats:
-        written = write_reports(report, args.output_dir, report_formats)
+        try:
+            written = write_reports(report, args.output_dir, report_formats)
+        except (OSError, ValueError) as exc:
+            return runtime_error(f"could not write reports: {exc}")
         print_written_reports(written)
         return exit_code
 
@@ -279,6 +307,13 @@ def main(argv: list[str] | None = None) -> int:
     print("No report written.")
 
     return exit_code
+
+
+def runtime_error(message: str, stream: TextIO | None = None) -> int:
+    if stream is None:
+        stream = sys.stderr
+    print(f"watch4ping: error: {message}", file=stream)
+    return EXIT_RUNTIME_ERROR
 
 
 def print_written_reports(paths: Iterable[Path]) -> None:

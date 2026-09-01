@@ -166,6 +166,14 @@ def test_resolve_html_report_allows_only_indexed_reports(tmp_path):
     assert resolve_html_report(tmp_path, "../unrelated.html", index_data) is None
 
 
+def test_resolve_html_report_handles_missing_indexed_file(tmp_path):
+    index_data = {
+        "sessions": [{"reports": {"html": "missing.html"}}],
+    }
+
+    assert resolve_html_report(tmp_path, "missing.html", index_data) is None
+
+
 def build_session(
     started_at: str,
     profile: str,

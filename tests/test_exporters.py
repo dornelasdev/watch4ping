@@ -1,6 +1,8 @@
 import json
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from watch4ping.exporters import (
     cleanup_reports,
     read_report_index,
@@ -81,6 +83,25 @@ def test_read_report_index_migrates_missing_alert_counts(tmp_path):
 
     assert index_data["schema_version"] == "2"
     assert index_data["sessions"][0]["summary"]["alert_count"] == 0
+
+
+def test_read_report_index_reports_malformed_json_location(tmp_path):
+    index_path = tmp_path / "index.json"
+    index_path.write_text('{"sessions": [', encoding="utf-8")
+
+    with pytest.raises(ValueError, match=r"malformed JSON at line 1, column 15"):
+        read_report_index(index_path)
+
+
+def test_read_report_index_rejects_invalid_session_structure(tmp_path):
+    index_path = tmp_path / "index.json"
+    index_path.write_text(
+        json.dumps({"schema_version": "2", "sessions": ["invalid"]}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="session 1 must be an object"):
+        read_report_index(index_path)
 
 
 def test_write_reports_includes_profile_name_in_filenames_and_index(tmp_path):
