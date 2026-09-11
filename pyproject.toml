@@ -14,7 +14,7 @@ authors = [
 ]
 keywords = ["internet", "monitoring", "ping", "network", "cli"]
 classifiers = [
-  "Development Status :: 4 - Beta",
+  "Development Status :: 5 - Production/Stable",
   "Environment :: Console",
   "Intended Audience :: End Users/Desktop",
   "License :: OSI Approved :: MIT License",
@@ -30,6 +30,12 @@ classifiers = [
 dependencies = [
   "tomli>=2.0; python_version < '3.11'",
 ]
+
+[project.urls]
+Homepage = "https://github.com/dornelasdev/watch4ping"
+Repository = "https://github.com/dornelasdev/watch4ping"
+Issues = "https://github.com/dornelasdev/watch4ping/issues"
+Changelog = "https://github.com/dornelasdev/watch4ping/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = [
@@ -52,6 +58,7 @@ include = [
   "/src",
   "/tests",
   "/docs",
+  "/scripts",
   "/CHANGELOG.md",
   "/LICENSE",
   "/README.md",

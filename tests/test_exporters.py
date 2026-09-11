@@ -1,9 +1,11 @@
+import csv
 import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from watch4ping.exporters import (
+    atomic_write_text,
     cleanup_reports,
     read_report_index,
     slugify_profile_name,
@@ -46,6 +48,21 @@ def test_write_reports_creates_report_index(tmp_path):
     }
 
 
+def test_write_reports_writes_atomic_csv_export(tmp_path):
+    start = datetime(2026, 7, 18, 12, 0, 0, tzinfo=timezone.utc)
+
+    written = write_reports(build_sample_report(start), tmp_path, ("csv",))
+
+    with written[0].open(newline="", encoding="utf-8") as csv_file:
+        rows = list(csv.DictReader(csv_file))
+
+    assert len(rows) == 4
+    assert rows[0]["target_label"] == "cloudflare"
+    assert rows[0]["latency_ms"] == "12.0"
+    assert rows[1]["target_label"] == "dns"
+    assert rows[1]["error"] == "timeout"
+
+
 def test_write_reports_appends_to_existing_report_index(tmp_path):
     first_start = datetime(2026, 7, 18, 12, 0, 0, tzinfo=timezone.utc)
     second_start = datetime(2026, 7, 18, 12, 5, 0, tzinfo=timezone.utc)
@@ -65,6 +82,54 @@ def test_write_reports_appends_to_existing_report_index(tmp_path):
     assert index_data["sessions"][1]["reports"] == {
         "md": "watch4ping-20260718-120500.md"
     }
+
+
+def test_write_reports_uses_collision_safe_names_for_same_second(tmp_path):
+    start = datetime(2026, 7, 18, 12, 0, 0, tzinfo=timezone.utc)
+    report = build_sample_report(start)
+
+    first_written = write_reports(report, tmp_path, ("json",))
+    first_written[0].unlink()
+    second_written = write_reports(report, tmp_path, ("json",))
+
+    index_data = json.loads((tmp_path / "index.json").read_text(encoding="utf-8"))
+
+    assert first_written == [tmp_path / "watch4ping-20260718-120000.json"]
+    assert second_written == [tmp_path / "watch4ping-20260718-120000-2.json"]
+    assert [session["reports"]["json"] for session in index_data["sessions"]] == [
+        "watch4ping-20260718-120000.json",
+        "watch4ping-20260718-120000-2.json",
+    ]
+
+
+def test_write_reports_validates_index_before_creating_report_files(tmp_path):
+    (tmp_path / "index.json").write_text('{"sessions": [', encoding="utf-8")
+    report = build_sample_report(
+        datetime(2026, 7, 18, 12, 0, 0, tzinfo=timezone.utc)
+    )
+
+    with pytest.raises(ValueError, match="malformed JSON"):
+        write_reports(report, tmp_path, ("json",))
+
+    assert not (tmp_path / "watch4ping-20260718-120000.json").exists()
+
+
+def test_atomic_write_preserves_destination_and_removes_temporary_file_on_failure(
+    tmp_path, monkeypatch
+):
+    destination = tmp_path / "index.json"
+    destination.write_text("original\n", encoding="utf-8")
+
+    def fail_to_replace(*_args):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr("watch4ping.exporters.os.replace", fail_to_replace)
+
+    with pytest.raises(OSError, match="replace failed"):
+        atomic_write_text(destination, "replacement\n")
+
+    assert destination.read_text(encoding="utf-8") == "original\n"
+    assert list(tmp_path.glob(".index.json.*.tmp")) == []
 
 
 def test_read_report_index_migrates_missing_alert_counts(tmp_path):

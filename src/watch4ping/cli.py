@@ -10,6 +10,7 @@ from typing import Iterable, TextIO
 from . import __version__
 from .config import DEFAULT_CONFIG_PATH, ProfileConfig, load_config
 from .dashboard import DEFAULT_DASHBOARD_PORT, serve_dashboard
+from .doctor import doctor_has_failures, format_doctor, run_doctor
 from .exporters import cleanup_reports, read_report_index, write_reports
 from .models import Target
 from .monitor import MonitorConfig, run_monitor
@@ -38,7 +39,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=("monitor", "history", "compare", "config", "cleanup", "dashboard"),
+        choices=(
+            "monitor",
+            "history",
+            "compare",
+            "config",
+            "cleanup",
+            "dashboard",
+            "doctor",
+        ),
         default="monitor",
         help="Command to run. Defaults to monitor.",
     )
@@ -232,6 +241,11 @@ def main(argv: list[str] | None = None) -> int:
         except OSError as exc:
             return runtime_error(f"could not start dashboard: {exc}")
         return EXIT_SUCCESS
+
+    if args.command == "doctor":
+        checks = run_doctor(args.config, args.output_dir, args.profile)
+        print(format_doctor(checks))
+        return EXIT_RUNTIME_ERROR if doctor_has_failures(checks) else EXIT_SUCCESS
 
     try:
         loaded_config = load_config(args.config)

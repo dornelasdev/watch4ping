@@ -30,6 +30,11 @@ Consumers should preserve unknown fields and reject unsupported
 `schema_version` values rather than assuming their meaning. Markdown and HTML
 reports are presentation formats and should not be parsed as stable schemas.
 
+Within a stable report schema, new optional fields may be added in a compatible
+watch4ping release. Removing a field, changing its type or meaning, or making an
+optional field required causes the report schema identifier to change. Consumers
+should ignore fields they do not recognize.
+
 ## CSV Export
 
 CSV is a flat raw-sample export without a schema marker. Its columns are:
@@ -51,6 +56,10 @@ The reader accepts indexes with no schema version, schema `"1"`, or schema
 `"2"`. Older entries that do not contain an alert count are treated as having
 zero alerts. The next index write records schema `"2"`. Unknown schema versions,
 malformed JSON, and invalid session structures are rejected with a clear error.
+
+Compatible releases may add optional index fields without changing schema `"2"`.
+An incompatible structural change requires a new index schema and an explicit
+migration path where practical.
 
 Report paths in the index are relative to the selected output directory. The
 dashboard serves only indexed HTML files that remain inside that directory and

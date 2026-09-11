@@ -1,13 +1,12 @@
 # watch4ping
 
-`watch4ping` is a small professional CLI tool for monitoring an internet connection.
-It pings a target repeatedly until interrupted with `Ctrl-C`, then writes a portable
-session report.
+`watch4ping` is a professional CLI tool for monitoring an internet connection.
+It pings one or more targets until interrupted with `Ctrl-C` or a configured
+duration ends, then analyzes the session and writes portable reports.
 
 ## Status
 
-The current development version is `0.9.0`. watch4ping is approaching its first
-stable release and currently provides:
+Version `1.0.0` is the first stable release. It provides:
 
 - Continuous or duration-limited monitoring of one or more labeled targets
 - Live packet-loss and average-latency statistics
@@ -20,19 +19,34 @@ Report storage remains file-based by design: individual reports are portable,
 while `reports/index.json` provides the compact session history used by CLI and
 dashboard views.
 
-## Quick Start
+## Installation
 
 watch4ping requires Python 3.10 or newer and the operating system's `ping`
-utility.
+utility. Linux, macOS, and Windows are supported.
+
+Install from a local clone into a virtual environment:
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install -e ".[dev]"
-watch4ping -t 1.1.1.1 -i 2 -w 1
+python -m pip install .
+watch4ping --version
 ```
 
-Check the installed version with `watch4ping --version`.
+On Windows PowerShell, activate the environment with:
+
+```powershell
+.venv\Scripts\Activate.ps1
+```
+
+The standard `ping` utility is normally included with each supported operating
+system. Run `watch4ping doctor` after installation to verify the environment.
+
+## Quick Start
+
+```bash
+watch4ping -t 1.1.1.1 -i 2 -w 1
+```
 
 Targets may be labeled and repeated:
 
@@ -93,6 +107,9 @@ The CLI uses stable exit codes for automation:
 
 Report writing still completes before the command exits. A run without triggered
 alerts returns `0`; invalid CLI usage returns `2`.
+
+The commands, stream behavior, precedence rules, and compatibility guarantees
+for automation are documented in the [CLI contract](docs/cli-contract.md).
 
 For non-interactive use, pass one or more report formats:
 
@@ -209,6 +226,17 @@ watch4ping cleanup --dry-run --keep 20
 watch4ping cleanup --keep 20
 ```
 
+Check whether the local environment is ready to monitor and store reports:
+
+```bash
+watch4ping doctor
+watch4ping doctor --profile home
+```
+
+The diagnostic checks Python, platform support, the system `ping` command,
+configuration and profile validity, output access, and the report index. It does
+not contact monitoring targets or change report history.
+
 ## Development
 
 Install the project and development tools in an active virtual environment:
@@ -228,9 +256,12 @@ Build and validate release distributions:
 ```bash
 python -m build
 python -m twine check dist/*
+python scripts/verify_release.py
 ```
 
-GitHub Actions runs the tests on Python 3.10 through 3.14 and verifies a clean
-wheel installation. See the [changelog](CHANGELOG.md),
+GitHub Actions runs the tests on Python 3.10 through 3.14 on Ubuntu, adds macOS
+and Windows coverage on Python 3.14, and verifies a clean wheel installation.
+See the [changelog](CHANGELOG.md),
+[CLI contract](docs/cli-contract.md),
 [report schema notes](docs/report-schema.md), and
 [release checklist](docs/releasing.md) for project maintenance details.

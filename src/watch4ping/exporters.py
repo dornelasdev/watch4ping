@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import re
 from datetime import datetime, timezone
+from io import StringIO
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Iterable
 
 from .models import SessionReport, TargetReport
@@ -20,31 +23,46 @@ def write_reports(
     formats: Iterable[str],
     profile_name: str | None = None,
 ) -> list[Path]:
+    formats = tuple(formats)
+    unsupported_formats = set(formats) - {"json", "csv", "md", "html"}
+    if unsupported_formats:
+        unsupported = sorted(unsupported_formats)[0]
+        raise ValueError(f"Unsupported report format: {unsupported}")
+
     output_dir.mkdir(parents=True, exist_ok=True)
+    index_data = read_report_index(output_dir / "index.json")
     profile_name = profile_name if profile_name is not None else report.metadata.profile_name
-    base_name = build_report_base_name(report, profile_name)
+    base_name = find_available_report_base_name(
+        output_dir,
+        build_report_base_name(report, profile_name),
+        index_data,
+    )
     written: list[Path] = []
     written_by_format: dict[str, Path] = {}
 
     for report_format in formats:
         if report_format == "json":
             path = output_dir / f"{base_name}.json"
-            path.write_text(json.dumps(report.to_dict(), indent=2) + "\n", encoding="utf-8")
+            atomic_write_text(path, json.dumps(report.to_dict(), indent=2) + "\n")
         elif report_format == "csv":
             path = output_dir / f"{base_name}.csv"
             write_csv(report, path)
         elif report_format == "md":
             path = output_dir / f"{base_name}.md"
-            path.write_text(format_markdown_report(report), encoding="utf-8")
+            atomic_write_text(path, format_markdown_report(report))
         elif report_format == "html":
             path = output_dir / f"{base_name}.html"
-            path.write_text(format_html_report(report), encoding="utf-8")
-        else:
-            raise ValueError(f"Unsupported report format: {report_format}")
+            atomic_write_text(path, format_html_report(report))
         written.append(path)
         written_by_format[report_format] = path
 
-    update_report_index(report, output_dir, written_by_format, profile_name)
+    update_report_index(
+        report,
+        output_dir,
+        written_by_format,
+        profile_name,
+        index_data=index_data,
+    )
     return written
 
 
@@ -66,7 +84,7 @@ def cleanup_reports(output_dir: Path, keep: int, dry_run: bool = False) -> dict:
         index_data["sessions"] = kept_sessions
         index_data["updated_at"] = datetime.now(timezone.utc).isoformat()
         output_dir.mkdir(parents=True, exist_ok=True)
-        index_path.write_text(json.dumps(index_data, indent=2) + "\n", encoding="utf-8")
+        atomic_write_text(index_path, json.dumps(index_data, indent=2) + "\n")
 
     return {
         "dry_run": dry_run,
@@ -100,6 +118,33 @@ def build_report_base_name(report: SessionReport, profile_name: str | None = Non
     return f"watch4ping-{timestamp}"
 
 
+def find_available_report_base_name(
+    output_dir: Path,
+    base_name: str,
+    index_data: dict,
+) -> str:
+    occupied_names = collect_indexed_report_names(index_data)
+    candidate = base_name
+    suffix = 2
+
+    while candidate in occupied_names or any(output_dir.glob(f"{candidate}.*")):
+        candidate = f"{base_name}-{suffix}"
+        suffix += 1
+    return candidate
+
+
+def collect_indexed_report_names(index_data: dict) -> set[str]:
+    names: set[str] = set()
+    for session in index_data.get("sessions", []):
+        reports = session.get("reports", {})
+        if not isinstance(reports, dict):
+            continue
+        for report_path in reports.values():
+            if isinstance(report_path, str):
+                names.add(Path(report_path).stem)
+    return names
+
+
 def slugify_profile_name(profile_name: str | None) -> str | None:
     if profile_name is None:
         return None
@@ -109,34 +154,62 @@ def slugify_profile_name(profile_name: str | None) -> str | None:
 
 
 def write_csv(report: SessionReport, path: Path) -> None:
-    with path.open("w", newline="", encoding="utf-8") as csv_file:
-        writer = csv.DictWriter(
-            csv_file,
-            fieldnames=(
-                "sequence",
-                "target_label",
-                "target_host",
-                "timestamp",
-                "formatted_timestamp",
-                "ok",
-                "latency_ms",
-                "error",
-            ),
+    csv_file = StringIO(newline="")
+    writer = csv.DictWriter(
+        csv_file,
+        fieldnames=(
+            "sequence",
+            "target_label",
+            "target_host",
+            "timestamp",
+            "formatted_timestamp",
+            "ok",
+            "latency_ms",
+            "error",
+        ),
+    )
+    writer.writeheader()
+    for sample in report.session.samples:
+        writer.writerow(
+            {
+                "sequence": sample.sequence,
+                "target_label": sample.target_label,
+                "target_host": sample.target_host,
+                "timestamp": sample.timestamp.isoformat(),
+                "formatted_timestamp": sample.formatted_timestamp,
+                "ok": sample.ok,
+                "latency_ms": sample.latency_ms,
+                "error": sample.error,
+            }
         )
-        writer.writeheader()
-        for sample in report.session.samples:
-            writer.writerow(
-                {
-                    "sequence": sample.sequence,
-                    "target_label": sample.target_label,
-                    "target_host": sample.target_host,
-                    "timestamp": sample.timestamp.isoformat(),
-                    "formatted_timestamp": sample.formatted_timestamp,
-                    "ok": sample.ok,
-                    "latency_ms": sample.latency_ms,
-                    "error": sample.error,
-                }
-            )
+    atomic_write_text(path, csv_file.getvalue(), newline="")
+
+
+def atomic_write_text(path: Path, content: str, newline: str | None = None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        with NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline=newline,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=path.parent,
+            delete=False,
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+            temporary_file.write(content)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+        os.replace(temporary_path, path)
+    except BaseException:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
 
 
 def update_report_index(
@@ -144,14 +217,16 @@ def update_report_index(
     output_dir: Path,
     written_by_format: dict[str, Path],
     profile_name: str | None = None,
+    index_data: dict | None = None,
 ) -> Path:
     index_path = output_dir / "index.json"
-    index_data = read_report_index(index_path)
+    if index_data is None:
+        index_data = read_report_index(index_path)
     index_data["updated_at"] = datetime.now(timezone.utc).isoformat()
     index_data["sessions"].append(
         build_report_index_entry(report, output_dir, written_by_format, profile_name)
     )
-    index_path.write_text(json.dumps(index_data, indent=2) + "\n", encoding="utf-8")
+    atomic_write_text(index_path, json.dumps(index_data, indent=2) + "\n")
     return index_path
 
 

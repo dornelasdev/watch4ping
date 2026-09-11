@@ -21,6 +21,7 @@ from watch4ping.cli import (
     validate_config,
 )
 from watch4ping.config import ProfileConfig
+from watch4ping.doctor import DiagnosticCheck
 from watch4ping.models import MonitorSession, PingSample, Target
 from watch4ping.monitor import MonitorConfig
 from watch4ping.ping import PingCommandError
@@ -295,6 +296,39 @@ def test_parser_accepts_dashboard_command():
     assert str(args.output_dir) == "custom-reports"
     assert args.port == 9000
     assert args.open is True
+
+
+def test_parser_accepts_doctor_command():
+    args = build_parser().parse_args(
+        [
+            "doctor",
+            "--config",
+            "custom.toml",
+            "--output-dir",
+            "custom-reports",
+            "--profile",
+            "home",
+        ]
+    )
+
+    assert args.command == "doctor"
+    assert str(args.config) == "custom.toml"
+    assert str(args.output_dir) == "custom-reports"
+    assert args.profile == "home"
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_exit_code"),
+    [("WARN", 0), ("FAIL", EXIT_RUNTIME_ERROR)],
+)
+def test_main_returns_doctor_status(monkeypatch, capsys, status, expected_exit_code):
+    checks = (DiagnosticCheck(status, "Config", "diagnostic result"),)
+    monkeypatch.setattr("watch4ping.cli.run_doctor", lambda *_args: checks)
+
+    exit_code = main(["doctor"])
+
+    assert exit_code == expected_exit_code
+    assert f"{status}  Config" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("port", ["0", "65536", "abc"])

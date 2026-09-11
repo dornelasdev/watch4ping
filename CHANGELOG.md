@@ -2,7 +2,27 @@
 
 Notable changes to watch4ping are recorded here. Package versions use semantic
 versioning; repository tags use the shorter matching form, such as package
-version `0.9.0` and tag `v0.9`.
+version `1.0.0` and tag `v1.0`.
+
+## Unreleased
+
+## 1.0.0 - 2026-09-12
+
+### Added
+
+- Atomic report and index writes with cleanup after failed replacements.
+- Collision-safe report filenames for sessions starting in the same second.
+- Cross-platform ping fixtures and macOS/Windows GitHub Actions coverage.
+- `watch4ping doctor` environment diagnostics for platform, configuration,
+  output access, and report-index readiness.
+- A documented stable CLI, exit-code, and report compatibility contract.
+- Automated release-artifact inspection and a complete manual smoke checklist.
+
+### Changed
+
+- Package status advanced from Beta to Production/Stable.
+- End-user installation and supported-platform guidance now cover Linux, macOS,
+  and Windows.
 
 ## 0.9.0 - 2026-09-01
 
